@@ -42,8 +42,11 @@ if (!$ProjectNumber) {
 $query = 'query($owner:String!, $number:Int!) { user(login:$owner) { projectV2(number:$number) { title url closed repositories(first:100){nodes{nameWithOwner}} views(first:100){nodes{number name layout}} } } }'
 $project = Invoke-Gh @('api','graphql','-f',"query=$query",'-f',"owner=$owner",'-F',"number=$ProjectNumber",
     '--jq','.data.user.projectV2') | ConvertFrom-Json
-if ($project.closed -or $project.title -ne $title -or $repo -notin $project.repositories.nodes.nameWithOwner) {
-    throw "Project $ProjectNumber must be the open '$title' project linked to $repo."
+if ($project.closed -or $project.title -ne $title) {
+    throw "Project $ProjectNumber must be the open '$title' project."
+}
+if ($repo -notin $project.repositories.nodes.nameWithOwner) {
+    Invoke-Gh @('project','link',"$ProjectNumber",'--owner',$owner,'--repo','Session-Tape') | Out-Null
 }
 
 $itemsQuery = 'query($owner:String!, $number:Int!, $endCursor:String) { user(login:$owner) { projectV2(number:$number) { items(first:100,after:$endCursor) { nodes { content { ... on Issue { url } } } pageInfo { hasNextPage endCursor } } } } }'
