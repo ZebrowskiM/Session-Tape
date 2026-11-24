@@ -18,8 +18,13 @@ const notice = element("status");
 let active: import("./contracts").Session | null = null;
 let draftSession: string | null = null;
 let pendingNote: import("./contracts").NoteInput | null = null;
-let editingNoteId: string | null = null;
-let editDraft = "";
+const editDialog = element<HTMLDialogElement>("edit-dialog");
+const editForm = element<HTMLFormElement>("edit-form");
+const editField = element<HTMLTextAreaElement>("edit-body");
+const editSubmit = element<HTMLButtonElement>("submit-edit");
+let editBase: ArchiveNote | null = null;
+let competingVersion: ArchiveNote | null = null;
+let lastRenderedQuery = "";
 let editSaving = false;
 let reading = 0;
 let saving = false;
@@ -44,10 +49,116 @@ function controls(): void {
   if (orphan) showStatus("The original session is closed. Copy this draft or clear it to continue.", true);
 }
 
+type ArchiveNote = import("./contracts").Note;
+
+function updateEditControls(): void {
+  editField.readOnly = editSaving;
+  element<HTMLButtonElement>("cancel-edit").disabled = editSaving;
+  element<HTMLButtonElement>("review-edit").disabled = editSaving;
+  editSubmit.disabled = editSaving || competingVersion !== null || !editField.value.trim();
+}
+
+function openEditor(note: ArchiveNote, versionIndex = 0): void {
+  const version = note.versions[versionIndex];
+  editBase = note;
+  competingVersion = null;
+  element("edit-conflict").hidden = true;
+  element("edit-error").textContent = "";
+  element("edit-heading").textContent = versionIndex ? "Restore an earlier version" : "Edit note";
+  const date = new Date(version.savedAt).toLocaleString();
+  element("edit-context").textContent = versionIndex
+    ? `${note.sessionTitle} · Version from ${date}. Saving adds a new edit to the history.`
+    : `${note.sessionTitle} · Last saved ${date}`;
+  editField.value = version.body;
+  updateEditControls();
+  editDialog.showModal();
+  editField.focus();
+  editField.setSelectionRange(editField.value.length, editField.value.length);
+}
+
+function checkEditBase(notes: ArchiveNote[]): void {
+  if (!editBase) return;
+  const latest = notes.find(note => note.id === editBase?.id);
+  if (!latest || latest.updatedAt === editBase.updatedAt) return;
+  competingVersion = latest;
+  element("latest-text").textContent = latest.body;
+  element("edit-conflict").hidden = false;
+  updateEditControls();
+}
+
+function closeEditor(): void {
+  const id = editBase?.id;
+  editDialog.close();
+  editBase = null;
+  competingVersion = null;
+  const trigger = document.getElementById("edit-" + id);
+  (trigger ?? searchField).focus();
+}
+
+function displayTime(value: string): HTMLTimeElement {
+  const time = document.createElement("time");
+  time.dateTime = value;
+  time.textContent = new Date(value).toLocaleString();
+  return time;
+}
+
+function versionHistory(note: ArchiveNote, open?: boolean): HTMLDetailsElement {
+  const history = document.createElement("details");
+  history.className = "version-history";
+  history.dataset.noteId = note.id;
+  history.open = open ?? note.versions.some(version => version.matchesSearch);
+  const summary = document.createElement("summary");
+  summary.textContent = `Version history (${note.versions.length})`;
+  const versions = document.createElement("ol");
+  note.versions.forEach((version, index) => {
+    const item = document.createElement("li");
+    const label = document.createElement("strong");
+    const number = note.versions.length - index - 1;
+    label.textContent = number === 0 ? "Original" : `Edit ${number}${index === 0 ? " (current)" : ""}`;
+    item.append(label, " · ", displayTime(version.savedAt));
+    if (version.matchesSearch) item.append(" · Search match");
+    const body = document.createElement("p");
+    body.textContent = version.body;
+    item.append(body);
+    if (index > 0 && version.body !== note.body) {
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.className = "quiet";
+      restore.textContent = "Restore this version";
+      restore.addEventListener("click", () => openEditor(note, index));
+      item.append(restore);
+    }
+    versions.append(item);
+  });
+  history.append(summary, versions);
+  return history;
+}
+
+function noteCard(note: ArchiveNote, historyOpen?: boolean): HTMLLIElement {
+  const row = document.createElement("li");
+  const meta = document.createElement("div");
+  meta.className = "note-meta";
+  meta.append(note.sessionTitle + " · ", displayTime(note.createdAt));
+  if (note.versions.length > 1) meta.append(" · Updated ", displayTime(note.updatedAt));
+  const body = document.createElement("p");
+  body.className = "note-text";
+  body.textContent = note.body;
+  const edit = document.createElement("button");
+  edit.id = "edit-" + note.id;
+  edit.type = "button";
+  edit.className = "quiet";
+  edit.textContent = "Edit";
+  edit.addEventListener("click", () => openEditor(note));
+  row.append(meta, body, edit);
+  if (note.versions.length > 1) row.append(versionHistory(note, historyOpen));
+  return row;
+}
+
 async function refresh(): Promise<void> {
   const generation = ++reading;
   try {
-    const result = await api.snapshot(panel ? "" : searchField.value);
+    const query = panel ? "" : searchField.value.trim();
+    const result = await api.snapshot(query);
     if (generation !== reading) return;
     if (!result.ok) { showStatus(result.error, true); return; }
     active = result.value.active;
@@ -57,103 +168,15 @@ async function refresh(): Promise<void> {
     controls();
     if (panel) return;
     const list = element("notes");
-    const cards = result.value.notes.map(note => {
-      const row = document.createElement("li");
-      const meta = document.createElement("div");
-      meta.className = "note-meta";
-      const time = document.createElement("time");
-      time.dateTime = note.createdAt;
-      time.textContent = new Date(note.createdAt).toLocaleString();
-      meta.append(note.sessionTitle + " · ", time);
-      if (note.updatedAt !== note.createdAt) {
-        const updated = document.createElement("time");
-        updated.dateTime = note.updatedAt;
-        updated.textContent = ` · Updated ${new Date(note.updatedAt).toLocaleString()}`;
-        meta.append(updated);
-      }
-      row.append(meta);
-      if (editingNoteId === note.id) {
-        const editor = document.createElement("textarea");
-        editor.className = "note-edit";
-        editor.maxLength = 16000;
-        editor.rows = 4;
-        editor.value = editDraft;
-        editor.addEventListener("input", () => { editDraft = editor.value; });
-        const actions = document.createElement("div");
-        actions.className = "edit-actions";
-        const save = document.createElement("button");
-        save.type = "button";
-        save.textContent = "Save edit";
-        save.disabled = editSaving;
-        save.addEventListener("click", async () => {
-          if (editSaving || !editDraft.trim()) {
-            showStatus("Enter a note first.", true);
-            return;
-          }
-          editSaving = true;
-          save.disabled = true;
-          const ok = await apply(api.editNote({
-            id: note.id,
-            body: editDraft,
-            expectedUpdatedAt: note.updatedAt,
-          }));
-          editSaving = false;
-          if (!ok) { save.disabled = false; return; }
-          editingNoteId = null;
-          editDraft = "";
-          showStatus("Note updated.");
-          await refresh();
-        });
-        const cancel = document.createElement("button");
-        cancel.type = "button";
-        cancel.className = "quiet";
-        cancel.textContent = "Cancel";
-        cancel.addEventListener("click", () => {
-          editingNoteId = null;
-          editDraft = "";
-          void refresh();
-        });
-        actions.append(save, cancel);
-        row.append(editor, actions);
-      } else {
-        const body = document.createElement("p");
-        body.className = "note-text";
-        body.textContent = note.body;
-        const actions = document.createElement("div");
-        actions.className = "note-actions";
-        const edit = document.createElement("button");
-        edit.type = "button";
-        edit.className = "quiet";
-        edit.textContent = "Edit";
-        edit.addEventListener("click", () => {
-          editingNoteId = note.id;
-          editDraft = note.body;
-          void refresh();
-        });
-        actions.append(edit);
-        if (note.versions.length > 1) {
-          const history = document.createElement("details");
-          history.className = "version-history";
-          const summary = document.createElement("summary");
-          summary.textContent = `Version history (${note.versions.length})`;
-          const versions = document.createElement("ol");
-          for (const version of note.versions) {
-            const item = document.createElement("li");
-            const savedAt = document.createElement("time");
-            savedAt.dateTime = version.savedAt;
-            savedAt.textContent = new Date(version.savedAt).toLocaleString();
-            const versionBody = document.createElement("p");
-            versionBody.textContent = version.body;
-            item.append(savedAt, versionBody);
-            versions.append(item);
-          }
-          history.append(summary, versions);
-          actions.append(history);
-        }
-        row.append(body, actions);
-      }
-      return row;
-    });
+    checkEditBase(result.value.notes);
+    const expanded = new Map<string, boolean>();
+    if (query === lastRenderedQuery) {
+      list.querySelectorAll<HTMLDetailsElement>("details[data-note-id]").forEach(history => {
+        expanded.set(history.dataset.noteId!, history.open);
+      });
+    }
+    lastRenderedQuery = query;
+    const cards = result.value.notes.map(note => noteCard(note, expanded.get(note.id)));
     list.replaceChildren(...cards);
     const empty = element("empty");
     empty.hidden = cards.length !== 0;
@@ -173,6 +196,53 @@ async function apply(action: Promise<import("./contracts").Reply<void>>): Promis
     return false;
   }
 }
+
+editField.addEventListener("input", updateEditControls);
+element("cancel-edit").addEventListener("click", closeEditor);
+editDialog.addEventListener("cancel", event => {
+  event.preventDefault();
+  if (!editSaving) closeEditor();
+});
+element("review-edit").addEventListener("click", () => {
+  if (!competingVersion) return;
+  editBase = competingVersion;
+  competingVersion = null;
+  element("edit-conflict").hidden = true;
+  element("edit-error").textContent = "";
+  updateEditControls();
+  editField.focus();
+});
+editForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!editBase || editSubmit.disabled) return;
+  editSaving = true;
+  updateEditControls();
+  element("edit-error").textContent = "";
+  try {
+    const result = await api.editNote({
+      id: editBase.id, body: editField.value, expectedUpdatedAt: editBase.updatedAt,
+    });
+    if (!result.ok) {
+      element("edit-error").textContent = result.error;
+      await refresh();
+      return;
+    }
+    showStatus("Note saved.");
+    await refresh();
+    closeEditor();
+  } catch {
+    element("edit-error").textContent = "The app could not confirm the save. Try again.";
+  } finally {
+    editSaving = false;
+    updateEditControls();
+  }
+});
+editField.addEventListener("keydown", event => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    if (!editSubmit.disabled) editForm.requestSubmit();
+  }
+});
 
 startForm.addEventListener("submit", async event => {
   event.preventDefault();

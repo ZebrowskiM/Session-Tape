@@ -135,3 +135,46 @@ test("upgrades existing version 1 databases without losing notes", t => {
     ]);
   } finally { db.close(); }
 });
+
+test("history search finds an edited note once and identifies the matching earlier versions", t => {
+  const path = temporaryProfile(t);
+  let db = new Store(path);
+  db.start("Import review");
+  const note = { id: randomUUID(), sessionId: db.snapshot("").active.id, body: "50% blank rows" };
+  db.addNote(note);
+  const change = body => db.editNote({ id: note.id, expectedUpdatedAt: db.snapshot("").notes[0].updatedAt, body });
+  change("50% missing dates");
+  db.finish(note.sessionId);
+  change("Orders retained");
+  db.close();
+
+  db = new Store(path);
+  try {
+    const hits = db.snapshot("50%").notes;
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].body, "Orders retained");
+    assert.deepEqual(hits[0].versions.filter(v => v.matchesSearch).map(v => v.body),
+      ["50% missing dates", "50% blank rows"]);
+    assert.equal(db.snapshot("BLANK").notes[0].id, note.id);
+    assert.equal(db.snapshot("_").notes.length, 0);
+    assert.ok(db.snapshot("Import review").notes[0].versions.every(v => !v.matchesSearch));
+    change(note.body);
+    assert.deepEqual(db.snapshot("").notes[0].versions.map(v => v.body),
+      [note.body, "Orders retained", "50% missing dates", note.body]);
+  } finally { db.close(); }
+});
+
+test("a retried creation still compares against the original text after a correction", t => {
+  const db = new Store(temporaryProfile(t));
+  try {
+    db.start("Retry");
+    const note = { id: randomUUID(), sessionId: db.snapshot("").active.id, body: "Original" };
+    db.addNote(note);
+    db.editNote({ id: note.id, expectedUpdatedAt: db.snapshot("").notes[0].updatedAt, body: "Corrected" });
+    db.finish(note.sessionId);
+    db.addNote(note);
+    assert.throws(() => db.addNote({ ...note, body: "Corrected" }), /different entry/);
+    assert.equal(db.snapshot("").notes.length, 1);
+    assert.equal(db.snapshot("").notes[0].body, "Corrected");
+  } finally { db.close(); }
+});

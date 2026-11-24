@@ -17,10 +17,12 @@ The first setup and Electron runtime download need internet access. After instal
 
 1. In the archive, start a session named **CSV import**.
 2. Select **Open panel**, type “Only the delivery dates were blank,” and press **Ctrl+Enter** or **Cmd+Enter**. Wait for **Note saved**.
-3. Return to the archive and search for **delivery**. The note shows its session and local display time. Use **Edit** to update it; its earlier text and save time remain in version history.
+3. Return to the archive and use **Edit** to change “delivery dates” to “shipping dates”. Save with **Ctrl+Enter** or **Cmd+Enter**. Search for **delivery** to find the original wording in the expanded version history.
 4. Close both windows and relaunch. The active session and saved note are restored. **Finish session** closes it to new entries and keeps its notes searchable.
 
-Draft text stays in the editing window until saved. Closing the window discards that unsaved text. The archive shows the newest 100 matching notes. Search uses literal substrings and SQLite’s built-in case folding. The compact panel requests always-on-top on Windows, macOS and Linux X11. The archive contains the same editor on Wayland.
+Choose **Restore this version** to review earlier wording. Saving it appends a new edit, including on a finished session. If the note changes while its editor is open, the dialog keeps your draft and shows the latest text for comparison.
+
+Draft text stays in the editing window until saved. Closing the window discards that unsaved text. The archive shows the newest 100 matching notes. Search uses literal substrings and SQLite’s built-in case folding across session titles, current text and earlier versions. The compact panel requests always-on-top on Windows, macOS and Linux X11. The archive contains the same editor on Wayland.
 
 ## Develop and package
 

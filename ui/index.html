@@ -31,10 +31,29 @@
     </section>
     <p id="status" role="status" aria-live="polite"></p>
     <section id="archive" aria-label="Saved notes">
-      <div class="archive-head"><h2>Saved notes</h2><label class="sr-only" for="search">Search notes and session titles</label>
+      <div class="archive-head"><h2>Saved notes</h2><label class="sr-only" for="search">Search notes, earlier versions and session titles</label>
       <input id="search" maxlength="200" type="search" placeholder="Search notes and sessions"></div>
       <ol id="notes"></ol><p id="empty" hidden></p>
     </section>
   </main>
+  <dialog id="edit-dialog" aria-labelledby="edit-heading">
+    <form id="edit-form">
+      <h2 id="edit-heading">Edit note</h2>
+      <p class="note-meta" id="edit-context"></p>
+      <label for="edit-body">Note text</label>
+      <textarea id="edit-body" maxlength="16000" rows="5" required autofocus></textarea>
+      <div id="edit-conflict" hidden>
+        <strong>This note changed while you were editing.</strong>
+        <p>Latest saved text</p>
+        <blockquote id="latest-text"></blockquote>
+        <button type="button" class="quiet" id="review-edit">Continue with my draft</button>
+      </div>
+      <p id="edit-error" role="alert"></p>
+      <div class="edit-actions">
+        <button type="button" class="quiet" id="cancel-edit">Cancel</button>
+        <button id="submit-edit">Save edit</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>

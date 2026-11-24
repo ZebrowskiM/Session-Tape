@@ -84,22 +84,30 @@ export class Store {
       SELECT n.id, n.session_id AS sessionId, s.title AS sessionTitle, n.body,
         n.created_at AS createdAt, COALESCE(n.updated_at, n.created_at) AS updatedAt
       FROM notes n JOIN sessions s ON s.id = n.session_id
-      WHERE instr(lower(n.body), lower(?)) > 0 OR instr(lower(s.title), lower(?)) > 0
+      WHERE instr(lower(n.body), lower(:term)) > 0 OR instr(lower(s.title), lower(:term)) > 0
+        OR EXISTS (
+          SELECT 1 FROM note_versions v WHERE v.note_id = n.id
+            AND instr(lower(v.body), lower(:term)) > 0
+        )
       ORDER BY n.rowid DESC LIMIT 100
-    `).all(query, query);
+    `).all({ term: query });
     const notes = rows as unknown as Note[];
     if (notes.length) {
       const placeholders = notes.map(() => "?").join(", ");
       const history = this.db.prepare(`
-        SELECT note_id AS noteId, body, saved_at AS savedAt
+        SELECT note_id AS noteId, body, saved_at AS savedAt,
+          (? <> '' AND instr(lower(body), lower(?)) > 0) AS matched
         FROM note_versions
         WHERE note_id IN (${placeholders})
         ORDER BY id DESC
-      `).all(...notes.map(note => note.id)) as unknown as (NoteVersion & { noteId: string })[];
+      `).all(query, query, ...notes.map(note => note.id)) as unknown as
+        (NoteVersion & { noteId: string; matched: number })[];
       const byNote = new Map<string, NoteVersion[]>();
       for (const version of history) {
         const versions = byNote.get(version.noteId) ?? [];
-        versions.push({ body: version.body, savedAt: version.savedAt });
+        const entry: NoteVersion = { body: version.body, savedAt: version.savedAt };
+        if (version.matched) entry.matchesSearch = true;
+        versions.push(entry);
         byNote.set(version.noteId, versions);
       }
       for (const note of notes) {
@@ -133,7 +141,11 @@ export class Store {
     const id = uuid(fields.id);
     const sessionId = uuid(fields.sessionId);
     const body = textField(fields.body, "note", 16000);
-    const existing = this.db.prepare("SELECT session_id, body FROM notes WHERE id = ?").get(id);
+    const existing = this.db.prepare(`
+      SELECT session_id, COALESCE(
+        (SELECT v.body FROM note_versions v WHERE v.note_id = n.id ORDER BY v.id LIMIT 1), n.body
+      ) AS body FROM notes n WHERE n.id = ?
+    `).get(id);
     if (existing) {
       if (existing.session_id === sessionId && existing.body === body) return;
       throw new InputError("This note ID already belongs to a different entry.");
