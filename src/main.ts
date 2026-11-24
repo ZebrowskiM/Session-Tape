@@ -75,6 +75,7 @@ if (!app.requestSingleInstanceLock()) {
     register("session:start", title => db.start(title), true);
     register("session:finish", id => db.finish(id), true);
     register("note:add", note => db.addNote(note), true);
+    register("note:edit", note => db.editNote(note), true);
     register("window:show", view => {
       if (view !== "archive" && view !== "panel") throw new InputError("Unknown window.");
       showWindow(view);

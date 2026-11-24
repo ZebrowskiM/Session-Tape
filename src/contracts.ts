@@ -10,6 +10,13 @@ export interface Note {
   sessionTitle: string;
   body: string;
   createdAt: string;
+  updatedAt: string;
+  versions: NoteVersion[];
+}
+
+export interface NoteVersion {
+  body: string;
+  savedAt: string;
 }
 
 export interface Snapshot {
@@ -23,6 +30,12 @@ export interface NoteInput {
   body: string;
 }
 
+export interface NoteEditInput {
+  id: string;
+  body: string;
+  expectedUpdatedAt: string;
+}
+
 export type Reply<T> = { ok: true; value: T } | { ok: false; error: string };
 export type View = "archive" | "panel";
 
@@ -31,6 +44,7 @@ export interface SessionTape {
   start(title: string): Promise<Reply<void>>;
   finish(sessionId: string): Promise<Reply<void>>;
   addNote(note: NoteInput): Promise<Reply<void>>;
+  editNote(note: NoteEditInput): Promise<Reply<void>>;
   show(view: View): Promise<Reply<void>>;
   onChange(listener: () => void): () => void;
 }

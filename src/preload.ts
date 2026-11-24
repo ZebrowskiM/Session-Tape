@@ -6,6 +6,7 @@ const bridge: SessionTape = {
   start: title => ipcRenderer.invoke("session:start", title),
   finish: id => ipcRenderer.invoke("session:finish", id),
   addNote: note => ipcRenderer.invoke("note:add", note),
+  editNote: note => ipcRenderer.invoke("note:edit", note),
   show: view => ipcRenderer.invoke("window:show", view),
   onChange: listener => {
     const notify = () => listener();

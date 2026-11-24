@@ -18,6 +18,9 @@ const notice = element("status");
 let active: import("./contracts").Session | null = null;
 let draftSession: string | null = null;
 let pendingNote: import("./contracts").NoteInput | null = null;
+let editingNoteId: string | null = null;
+let editDraft = "";
+let editSaving = false;
 let reading = 0;
 let saving = false;
 
@@ -62,10 +65,93 @@ async function refresh(): Promise<void> {
       time.dateTime = note.createdAt;
       time.textContent = new Date(note.createdAt).toLocaleString();
       meta.append(note.sessionTitle + " · ", time);
-      const body = document.createElement("p");
-      body.className = "note-text";
-      body.textContent = note.body;
-      row.append(meta, body);
+      if (note.updatedAt !== note.createdAt) {
+        const updated = document.createElement("time");
+        updated.dateTime = note.updatedAt;
+        updated.textContent = ` · Updated ${new Date(note.updatedAt).toLocaleString()}`;
+        meta.append(updated);
+      }
+      row.append(meta);
+      if (editingNoteId === note.id) {
+        const editor = document.createElement("textarea");
+        editor.className = "note-edit";
+        editor.maxLength = 16000;
+        editor.rows = 4;
+        editor.value = editDraft;
+        editor.addEventListener("input", () => { editDraft = editor.value; });
+        const actions = document.createElement("div");
+        actions.className = "edit-actions";
+        const save = document.createElement("button");
+        save.type = "button";
+        save.textContent = "Save edit";
+        save.disabled = editSaving;
+        save.addEventListener("click", async () => {
+          if (editSaving || !editDraft.trim()) {
+            showStatus("Enter a note first.", true);
+            return;
+          }
+          editSaving = true;
+          save.disabled = true;
+          const ok = await apply(api.editNote({
+            id: note.id,
+            body: editDraft,
+            expectedUpdatedAt: note.updatedAt,
+          }));
+          editSaving = false;
+          if (!ok) { save.disabled = false; return; }
+          editingNoteId = null;
+          editDraft = "";
+          showStatus("Note updated.");
+          await refresh();
+        });
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "quiet";
+        cancel.textContent = "Cancel";
+        cancel.addEventListener("click", () => {
+          editingNoteId = null;
+          editDraft = "";
+          void refresh();
+        });
+        actions.append(save, cancel);
+        row.append(editor, actions);
+      } else {
+        const body = document.createElement("p");
+        body.className = "note-text";
+        body.textContent = note.body;
+        const actions = document.createElement("div");
+        actions.className = "note-actions";
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.className = "quiet";
+        edit.textContent = "Edit";
+        edit.addEventListener("click", () => {
+          editingNoteId = note.id;
+          editDraft = note.body;
+          void refresh();
+        });
+        actions.append(edit);
+        if (note.versions.length > 1) {
+          const history = document.createElement("details");
+          history.className = "version-history";
+          const summary = document.createElement("summary");
+          summary.textContent = `Version history (${note.versions.length})`;
+          const versions = document.createElement("ol");
+          for (const version of note.versions) {
+            const item = document.createElement("li");
+            const savedAt = document.createElement("time");
+            savedAt.dateTime = version.savedAt;
+            savedAt.textContent = new Date(version.savedAt).toLocaleString();
+            const versionBody = document.createElement("p");
+            versionBody.textContent = version.body;
+            item.append(savedAt, versionBody);
+            versions.append(item);
+          }
+          history.append(summary, versions);
+          actions.append(history);
+        }
+        row.append(body, actions);
+      }
       return row;
     });
     list.replaceChildren(...cards);

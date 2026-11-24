@@ -32,6 +32,13 @@ button:disabled { opacity: .55; cursor: wait; }
 #notes li { border-top: 1px solid #c9cabe; padding: 13px 0; }
 .note-meta { font-size: 13px; color: #4e615c; overflow-wrap: anywhere; }
 .note-text { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.note-edit { width: 100%; margin-top: 8px; resize: vertical; }
+.edit-actions { display: flex; gap: 8px; margin-top: 8px; }
+.version-history { color: #465e58; font-size: 13px; }
+.version-history summary { cursor: pointer; }
+.version-history ol { padding-left: 20px; }
+.version-history li { border-top: 1px solid #e0dfd5; padding: 8px 0; }
+.version-history p { color: #153b3b; font-size: 14px; margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
 .panel header, .panel main { padding: 12px 16px; }
 .panel h1 { font-size: 26px; margin: 0 0 10px; }
