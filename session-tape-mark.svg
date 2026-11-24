@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="464" viewBox="0 0 160 116" role="img"><title>Session Tape cassette with a bookmark tab</title>
+<rect x="8" y="14" width="144" height="85" rx="16" fill="#153B3B"/>
+  <rect x="24" y="33" width="112" height="45" rx="22.5" fill="#F5F0E5"/>
+  <g fill="#153B3B"><circle cx="49" cy="55.5" r="14"/><circle cx="111" cy="55.5" r="14"/></g>
+  <path d="M69 85h22q4 0 4 4v14q0 3-3 1.5L80 98l-12 6.5q-3 1.5-3-1.5V89q0-4 4-4Z" fill="#ED9C43"/>
+</svg>

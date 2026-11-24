@@ -1,0 +1,41 @@
+:root { color-scheme: light; font: 15px/1.45 system-ui, sans-serif; color: #153b3b; background: #f5f0e5; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; }
+header, main { max-width: 850px; margin: auto; padding: 20px clamp(20px,5vw,48px); }
+header, .row, .note-actions, .archive-head, .session-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+header { border-bottom: 1px solid #c6c9bc; }
+.wordmark { display: inline-flex; gap: 9px; align-items: center; font-weight: 700; font-size: 18px; }
+.wordmark img { width: 38px; height: auto; }
+h1 { font: 500 clamp(35px,6vw,55px)/1.05 Georgia,serif; letter-spacing: -.03em; margin: 10px 0 23px; }
+h2 { font-size: 19px; margin: 0; overflow-wrap: anywhere; }
+.desk { background: #fffcf6; border: 1px solid #c9cabe; border-radius: 12px; padding: 19px; }
+label { display: block; font-weight: 600; margin-bottom: 6px; }
+input, textarea, button { font: inherit; }
+input, textarea { color: #183c3c; border: 1px solid #a8b2a6; background: white; padding: 9px 12px; border-radius: 6px; min-width: 0; }
+input { flex: 1; }
+textarea { width: 100%; display: block; resize: vertical; }
+button { cursor: pointer; border-radius: 6px; border: 1px solid #153b3b; background: #153b3b; color: white; padding: 8px 14px; font-weight: 600; white-space: nowrap; }
+button:hover { background: #254e4d; }
+button.quiet { background: transparent; color: #153b3b; border-color: #a8b2a6; }
+button.quiet:hover { background: #e9e7db; }
+button:disabled { opacity: .55; cursor: wait; }
+:focus-visible { outline: 3px solid #976122; outline-offset: 2px; }
+.note-actions { margin-top: 11px; }
+#shortcut, #status, #empty { color: #465e58; font-size: 13px; }
+#status { min-height: 1.4em; margin: 7px 1px 16px; }
+#status.error { color: #922d1c; }
+.session-head { margin-bottom: 16px; }
+.archive-head { flex-wrap: wrap; margin-bottom: 10px; }
+#search { flex: 0 1 245px; }
+#notes { list-style: none; padding: 0; margin: 0; }
+#notes li { border-top: 1px solid #c9cabe; padding: 13px 0; }
+.note-meta { font-size: 13px; color: #4e615c; overflow-wrap: anywhere; }
+.note-text { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
+.panel header, .panel main { padding: 12px 16px; }
+.panel h1 { font-size: 26px; margin: 0 0 10px; }
+.panel .desk { padding: 12px; }
+.panel .session-head { margin-bottom: 9px; }
+.panel .session-head h2 { font-size: 16px; }
+.panel #status { margin-bottom: 0; }

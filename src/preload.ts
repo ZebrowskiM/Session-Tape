@@ -1,0 +1,17 @@
+import { contextBridge, ipcRenderer } from "electron";
+import type { SessionTape } from "./contracts";
+
+const bridge: SessionTape = {
+  snapshot: query => ipcRenderer.invoke("archive:snapshot", query),
+  start: title => ipcRenderer.invoke("session:start", title),
+  finish: id => ipcRenderer.invoke("session:finish", id),
+  addNote: note => ipcRenderer.invoke("note:add", note),
+  show: view => ipcRenderer.invoke("window:show", view),
+  onChange: listener => {
+    const notify = () => listener();
+    ipcRenderer.on("archive:changed", notify);
+    return () => ipcRenderer.removeListener("archive:changed", notify);
+  },
+};
+
+contextBridge.exposeInMainWorld("sessionTape", bridge);
