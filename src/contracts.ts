@@ -17,6 +17,7 @@ export interface Note {
 export interface NoteVersion {
   body: string;
   savedAt: string;
+  matchesSearch?: boolean;
 }
 
 export interface Snapshot {
