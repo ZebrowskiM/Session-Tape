@@ -22,6 +22,10 @@ The first setup and Electron runtime download need internet access. After instal
 
 Draft text stays in the editing window until saved. Closing the window discards that unsaved text. The archive shows the newest 100 matching notes. Search uses literal substrings and SQLite’s built-in case folding. The compact panel requests always-on-top on Windows, macOS and Linux X11. The archive contains the same editor on Wayland.
 
+## Example: fictional CSV handoff
+
+A readable sample of the longer handoff story — original snip caption, decision to keep both orders, and a separately dated correction — lives in [`examples/csv-handoff/report.md`](examples/csv-handoff/report.md). Open that report alone and identify the decision and the correction (including which earlier event the correction references). All data there is invented. The snip graphic is a **design preview**, not a screenshot of a shipping feature.
+
 ## Develop and package
 
 | Command | Result |

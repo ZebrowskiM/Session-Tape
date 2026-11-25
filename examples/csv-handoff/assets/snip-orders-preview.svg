@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360" role="img" aria-labelledby="title desc">
+  <title id="title">Design preview: CSV import snip (fictional)</title>
+  <desc id="desc">Concept mock of a spreadsheet preview showing two fictional orders dropped. Not a screenshot of an implemented Session Tape feature.</desc>
+  <rect width="640" height="360" fill="#f4f6f8"/>
+  <rect x="24" y="24" width="592" height="312" rx="8" fill="#ffffff" stroke="#c5ced6"/>
+  <text x="40" y="56" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="16" fill="#1f2a33">northwind-orders-staging.csv — design preview</text>
+  <text x="40" y="78" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#6b7785">Invented rows · not a shipping UI screenshot</text>
+  <rect x="40" y="100" width="560" height="28" fill="#e8eef3"/>
+  <text x="52" y="119" font-family="Consolas, Menlo, monospace" font-size="12" fill="#334155">order_id   customer     ship_by      status</text>
+  <text x="52" y="155" font-family="Consolas, Menlo, monospace" font-size="12" fill="#0f172a">ORD-1041   Contoso Ltd  2026-03-12   queued</text>
+  <rect x="40" y="168" width="560" height="28" fill="#fff4e5"/>
+  <text x="52" y="187" font-family="Consolas, Menlo, monospace" font-size="12" fill="#9a3412">ORD-1042   Fabrikam     (blank)      dropped</text>
+  <text x="52" y="223" font-family="Consolas, Menlo, monospace" font-size="12" fill="#0f172a">ORD-1046   Adventure    2026-03-14   queued</text>
+  <rect x="40" y="236" width="560" height="28" fill="#fff4e5"/>
+  <text x="52" y="255" font-family="Consolas, Menlo, monospace" font-size="12" fill="#9a3412">ORD-1047   Northwind    (blank)      dropped</text>
+  <text x="40" y="310" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#6b7785">Caption concept: two dropped orders · keep-both decision recorded separately</text>
+</svg>
