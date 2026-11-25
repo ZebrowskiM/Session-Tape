@@ -1,6 +1,8 @@
 # Session Tape
 
-A local desktop notebook for debugging and research. Start a named session, save a timestamped note from the archive or compact panel, edit saved notes in the archive, and review their timestamped version history. Find notes later by session title or note text. Both windows use the same SQLite database.
+Session Tape is a local-first desktop notebook for documenting the human decisions behind AI-assisted code, research, and document review. Write down what was suggested, what you checked, and what you decided so someone else can follow your reasoning later.
+
+**Available now:** named sessions, timestamped notes from the archive or compact panel, searchable notes, and timestamped version history. Both windows use the same local SQLite database. Timeline replay, linked corrections, and export verification are planned.
 
 ## Run locally
 
@@ -50,9 +52,14 @@ User data lives in `session-tape.sqlite` inside Electron’s per-user applicatio
 
 ## Next milestones
 
-1. Add durable draft autosave, elapsed time, focus/break transitions and explicit gap handling after sleep.
-2. Add manual snip attachments, FTS5 indexing and exact replay markers.
-3. Add linked corrections, readable exports and portable backup/restore.
+The goal is a reviewable record of human judgment, not an AI detector. Start with one end-to-end workflow: record a suggestion, the evidence you checked, and your decision; revisit it later; add a correction without rewriting the original; and share a report someone can read without the app.
+
+1. **Capture the decision as you work.** Build on the existing notes with an [ordered session log](https://github.com/ZebrowskiM/Session-Tape/issues/1) and [draft recovery](https://github.com/ZebrowskiM/Session-Tape/issues/5). Start with optional prompts for what AI suggested, what you checked, and what you accepted, changed, or rejected and why. Keep capture manual; a draft is not a recorded decision. Mark uncertain time after [sleep or clock changes](https://github.com/ZebrowskiM/Session-Tape/issues/3) rather than inventing activity.
+2. **Revisit and correct without erasing the record.** Start with a chronological view of saved notes and [linked corrections](https://github.com/ZebrowskiM/Session-Tape/issues/10). Preserve the original across restarts and give each correction its own date. Test the text workflow against the fictional CSV example and extend it to [manual snips](https://github.com/ZebrowskiM/Session-Tape/issues/6) and [note history](https://github.com/ZebrowskiM/Session-Tape/issues/8). Keep full keyboard-accessible [timeline replay](https://github.com/ZebrowskiM/Session-Tape/issues/9) and richer [search](https://github.com/ZebrowskiM/Session-Tape/issues/7) on the roadmap without making them prerequisites for the first readable report.
+3. **Share only what the reader needs.** Start with an offline [Markdown report](https://github.com/ZebrowskiM/Session-Tape/issues/11), then [PDF](https://github.com/ZebrowskiM/Session-Tape/issues/12) from the same report model. Preview the contents, allow sensitive notes or attachments to be omitted, and label partial exports. Keep unsaved drafts and local file paths out; verify that correction links still work after moving the bundle. Use the [next-day handoff pilot](https://github.com/ZebrowskiM/Session-Tape/issues/25) to check that someone with only the report can explain the decision, its rationale, and the later correction.
+4. **Check the exported bytes, not the author.** Under [local data controls and provenance](https://github.com/ZebrowskiM/Session-Tape/issues/15), plan a detached SHA-256 digest for the finished report bundle. Verify that the original matches an independently retained digest and that a deliberately edited copy fails verification. An optional [trusted timestamp](https://www.rfc-editor.org/rfc/rfc3161.html) is a later enhancement; it could establish that the export existed by a certain time, not when each entry was made. Neither a digest nor a timestamp proves identity, completeness, that a review happened, or whether AI was used.
+
+Focus and break controls, [portable backups](https://github.com/ZebrowskiM/Session-Tape/issues/13), and cross-platform packaging remain on the roadmap. They support the workflow without being its main purpose.
 
 ## License
 
