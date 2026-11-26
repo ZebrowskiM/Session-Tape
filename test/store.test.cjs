@@ -1,7 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
-const { DatabaseSync } = require("node:sqlite");
+const { DatabaseSync, StatementSync } = require("node:sqlite");
 const { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { dirname, join } = require("node:path");
@@ -438,4 +439,156 @@ test("fresh, current and unsupported newer profiles do not produce upgrade copie
   try { newer.exec("PRAGMA user_version = 4"); } finally { newer.close(); }
   assert.throws(() => new Store(path), /different version/);
   assert.deepEqual(readdirSync(dirname(path)), ["session-tape.sqlite"]);
+});
+
+test("retry after process death between note commit and acknowledgement keeps the original event", t => {
+  const path = temporaryProfile(t);
+  const setup = new Store(path);
+  let sessionId;
+  let startEvent;
+  try {
+    setup.start("Review flagged rows");
+    sessionId = setup.snapshot("").active.id;
+    [startEvent] = setup.sessionEvents({ sessionId });
+  } finally { setup.close(); }
+  const note = { id: randomUUID(), sessionId, body: "Keep both rows." };
+  // Kill the writer before it can close the database or tell its caller the save succeeded.
+  const saveWithoutReply = `
+    const { Store } = require("../dist/store.js");
+    const [path, note] = process.argv.slice(1);
+    const db = new Store(path);
+    db.addNote(JSON.parse(note));
+    process.kill(process.pid, "SIGKILL");
+  `;
+  const crash = spawnSync(process.execPath, ["-e", saveWithoutReply, path, JSON.stringify(note)], {
+    cwd: __dirname, encoding: "utf8", timeout: 10000, windowsHide: true,
+  });
+  assert.ifError(crash.error);
+  // Windows reports a forced exit as a status instead of a POSIX signal.
+  if (process.platform === "win32") assert.notEqual(crash.status, 0);
+  else assert.equal(crash.signal, "SIGKILL", crash.stderr);
+
+  const reopened = new Store(path);
+  try {
+    const archive = reopened.snapshot("");
+    const events = reopened.sessionEvents({ sessionId });
+    assert.equal(archive.active.id, sessionId);
+    assert.deepEqual(archive.notes.map(n => [n.id, n.body]), [[note.id, note.body]]);
+    assert.equal(events.length, 2);
+    assert.deepEqual(events[0], startEvent);
+    assert.equal(events[1].sequence, 2);
+    assert.equal(events[1].kind, "note.added");
+    assert.equal(events[1].id, note.id);
+    reopened.addNote(note);
+    assert.deepEqual(reopened.snapshot(""), archive);
+    assert.deepEqual(reopened.sessionEvents({ sessionId }), events);
+  } finally { reopened.close(); }
+});
+
+test("a snapshot stays consistent when another connection edits and finishes during the read", t => {
+  const path = temporaryProfile(t);
+  const reader = new Store(path);
+  const writer = new Store(path);
+  try {
+    writer.start("Review");
+    const sessionId = writer.snapshot("").active.id;
+    const id = randomUUID();
+    writer.addNote({ id, sessionId, body: "Two rows were flagged." });
+    const before = reader.snapshot("");
+
+    // Commit between the snapshot's first result set and its remaining reads.
+    const all = StatementSync.prototype.all;
+    let committed = false;
+    const interleave = t.mock.method(StatementSync.prototype, "all", function (...args) {
+      const rows = all.apply(this, args);
+      if (!committed) {
+        committed = true;
+        writer.editNote({ id, body: "Only dates were blank.", expectedUpdatedAt: before.notes[0].updatedAt });
+        writer.finish(sessionId);
+      }
+      return rows;
+    });
+    try { assert.deepEqual(reader.snapshot(""), before); }
+    finally { interleave.mock.restore(); }
+    assert.ok(committed);
+
+    const after = reader.snapshot("");
+    assert.equal(after.active, null);
+    assert.deepEqual(after.notes[0].versions.map(v => v.body), ["Only dates were blank.", "Two rows were flagged."]);
+    assert.deepEqual(after, writer.snapshot(""));
+    assert.deepEqual(reader.sessionEvents({ sessionId }).map(e => [e.sequence, e.kind]), [
+      [1, "session.started"], [2, "note.added"], [3, "note.edited"], [4, "session.finished"],
+    ]);
+  } finally { writer.close(); reader.close(); }
+});
+
+test("a failed start releases the live session slot and a stale finish leaves the next session open", t => {
+  const path = temporaryProfile(t);
+  const first = new Store(path);
+  const second = new Store(path);
+  const observer = new DatabaseSync(path);
+  try {
+    observer.exec(`CREATE TRIGGER reject_start BEFORE INSERT ON session_events
+      WHEN NEW.kind = 'session.started' BEGIN SELECT RAISE(ABORT, 'start event rejected'); END;`);
+    assert.throws(() => first.start("Aborted"), /start event rejected/);
+    assert.equal(second.snapshot("").active, null);
+    assert.equal(observer.prepare("SELECT COUNT(*) AS count FROM sessions").get().count, 0);
+    assert.equal(observer.prepare("SELECT COUNT(*) AS count FROM session_events").get().count, 0);
+    observer.exec("DROP TRIGGER reject_start");
+
+    second.start("First session");
+    const firstId = first.snapshot("").active.id;
+    assert.throws(() => first.start("Competing start"), /Finish the current session/);
+    first.finish(firstId);
+    first.start("Next session");
+    const nextId = first.snapshot("").active.id;
+    assert.throws(() => second.finish(firstId), /already closed/);
+    assert.equal(second.snapshot("").active.id, nextId);
+    assert.deepEqual(second.sessionEvents({ sessionId: firstId }).map(e => [e.sequence, e.kind]), [
+      [1, "session.started"], [2, "session.finished"],
+    ]);
+    assert.deepEqual(second.sessionEvents({ sessionId: nextId }).map(e => [e.sequence, e.kind]), [
+      [1, "session.started"],
+    ]);
+  } finally { observer.close(); second.close(); first.close(); }
+});
+
+test("a migrated active session accepts live notes without inventing a clock origin", t => {
+  const path = temporaryProfile(t);
+  const legacy = new DatabaseSync(path);
+  const openId = randomUUID();
+  const oldNoteId = randomUUID();
+  const startedAt = "2024-06-05T12:00:00.000Z";
+  let closedId;
+  try {
+    closedId = seedV2(legacy).sessionId;
+    legacy.prepare("INSERT INTO sessions(id, title, started_at) VALUES (?, ?, ?)").run(openId, "Unfinished", startedAt);
+    legacy.prepare("INSERT INTO notes(id, session_id, body, created_at) VALUES (?, ?, ?, ?)")
+      .run(oldNoteId, openId, "Original entry.", startedAt);
+  } finally { legacy.close(); }
+
+  const db = new Store(path);
+  try {
+    assert.equal(db.snapshot("").active.id, openId);
+    const closed = db.sessionEvents({ sessionId: closedId });
+    const history = db.sessionEvents({ sessionId: openId });
+    assert.deepEqual(history.map(e => [e.sequence, e.kind, e.occurredAt]), [
+      [1, "session.started", startedAt], [2, "note.added", startedAt],
+    ]);
+    assert.equal(history[1].id, oldNoteId);
+    assert.ok(history.every(e => e.sequenceSource === "reconstructed" && e.utcOffsetMinutes === null &&
+      e.elapsedMs === null && e.phase === null));
+
+    const id = randomUUID();
+    db.addNote({ id, sessionId: openId, body: "Follow-up entry." });
+    db.finish(openId);
+    const events = db.sessionEvents({ sessionId: openId });
+    assert.deepEqual(events.slice(0, 2), history);
+    assert.deepEqual(events.slice(2).map(e => [e.sequence, e.kind, e.sequenceSource, e.elapsedMs, e.phase]), [
+      [3, "note.added", "recorded", null, null], [4, "session.finished", "recorded", null, "finished"],
+    ]);
+    assert.equal(events[2].id, id);
+    assert.equal(events[2].utcOffsetMinutes + new Date(events[2].occurredAt).getTimezoneOffset(), 0);
+    assert.deepEqual(db.sessionEvents({ sessionId: closedId }), closed);
+  } finally { db.close(); }
 });
