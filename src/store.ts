@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { Note, NoteVersion, Session, Snapshot } from "./contracts";
 
+const CURRENT_SCHEMA_VERSION = 2;
+
 export class InputError extends Error {}
 
 function textField(raw: unknown, name: string, maxLength: number, allowEmpty = false): string {
@@ -25,10 +27,14 @@ export class Store {
     this.db = new DatabaseSync(path);
     try {
       this.db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
-      let version = this.db.prepare("PRAGMA user_version").get()?.user_version;
+      const schemaVersion = this.db.prepare("PRAGMA user_version");
+      if (schemaVersion.get()?.user_version === CURRENT_SCHEMA_VERSION) return;
+
+      this.db.exec("BEGIN IMMEDIATE");
+      // Another connection may have completed the upgrade before we acquired the write lock.
+      let version = schemaVersion.get()?.user_version;
       if (version === 0) {
         this.db.exec(`
-          BEGIN IMMEDIATE;
           CREATE TABLE sessions (
             id TEXT PRIMARY KEY NOT NULL,
             title TEXT NOT NULL,
@@ -44,13 +50,11 @@ export class Store {
           );
           CREATE INDEX notes_by_session ON notes(session_id);
           PRAGMA user_version = 1;
-          COMMIT;
         `);
         version = 1;
       }
       if (version === 1) {
         this.db.exec(`
-          BEGIN IMMEDIATE;
           ALTER TABLE notes ADD COLUMN updated_at TEXT;
           CREATE TABLE note_versions (
             id INTEGER PRIMARY KEY,
@@ -60,12 +64,13 @@ export class Store {
           );
           CREATE INDEX note_versions_by_note ON note_versions(note_id);
           PRAGMA user_version = 2;
-          COMMIT;
         `);
-      } else if (version !== 2) {
+      } else if (version !== CURRENT_SCHEMA_VERSION) {
         throw new Error("This database was created by a different version of Session Tape.");
       }
+      this.db.exec("COMMIT");
     } catch (error) {
+      // Closing the connection rolls back any uncommitted schema and data changes.
       this.db.close();
       throw error;
     }

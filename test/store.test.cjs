@@ -93,6 +93,31 @@ test("editing a saved note preserves timestamped versions and rejects stale edit
   } finally { db.close(); }
 });
 
+test("a failed second migration rolls back the entire upgrade and can be retried", t => {
+  const path = temporaryProfile(t);
+  const seed = new DatabaseSync(path);
+  try {
+    // An existing table forces SQLite to reject the second migration after the first one ran.
+    seed.exec("CREATE TABLE note_versions (marker TEXT); INSERT INTO note_versions VALUES ('kept');");
+  } finally { seed.close(); }
+
+  assert.throws(() => new Store(path), /note_versions already exists/);
+  const reopened = new DatabaseSync(path);
+  try {
+    assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, 0);
+    assert.deepEqual(reopened.prepare("SELECT name FROM sqlite_schema").all().map(row => row.name),
+      ["note_versions"]);
+    assert.equal(reopened.prepare("SELECT marker FROM note_versions").get().marker, "kept");
+    reopened.exec("DROP TABLE note_versions");
+  } finally { reopened.close(); }
+
+  const store = new Store(path);
+  try {
+    store.start("Retry after rollback");
+    assert.equal(store.snapshot("").active.title, "Retry after rollback");
+  } finally { store.close(); }
+});
+
 test("upgrades existing version 1 databases without losing notes", t => {
   const path = temporaryProfile(t);
   const sessionId = randomUUID();
