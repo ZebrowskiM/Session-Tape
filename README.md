@@ -50,6 +50,22 @@ The main process owns both windows and the database. It uses `node:sqlite` suppl
 
 User data lives in `session-tape.sqlite` inside Electron’s per-user application-data folder for **Session Tape**. The app stores timestamps in UTC and displays them in the local time zone. Local storage relies on the device for at-rest protection.
 
+Read a session’s history with `sessionEvents({ sessionId, afterSequence })`. A successful reply’s value contains up to 100 `events` and a `nextSequence` cursor. Pass that cursor as `afterSequence` to continue. A null cursor means the read reached the end. Reconstructed history preserves each note’s revision order and original timestamps. Older archives cannot always establish which side of session finish an edit occurred on.
+
+Recorded events use the process monotonic clock for `elapsedMs`. Whether that clock advances during system sleep depends on the OS. Use the per-session sequence for replay. An unknown elapsed time is stored as null.
+
+### Recover an archive after an upgrade failure
+
+Before changing an existing archive, Session Tape saves a verified copy beside the live database. Depending on the source schema, the filename is `session-tape.sqlite.before-v1-upgrade.sqlite`, `session-tape.sqlite.before-v2-upgrade.sqlite`, or `session-tape.sqlite.before-v3-upgrade.sqlite` for the v3 preview. The copy includes committed changes in SQLite’s write-ahead log. The app holds the SQLite write lock during copying, verification, and migration so another writer cannot change the archive between those steps. Large archives can take longer to open.
+
+After a successful upgrade the app shows the recovery file’s path. The file contains your unencrypted notes and edit history. Keep it until you have checked the upgraded archive, then delete it if you no longer need it. Each upgrade retry replaces the copy for that source version only after verifying the new copy.
+
+If the copy cannot be saved and verified, the app stops before upgrading. Check free space and write access in the data folder shown in the error, then retry. You can use the version that last opened your archive successfully in the meantime. If the upgrade failed after the copy was verified, the error gives its path. Use these steps to restore that copy.
+
+1. Quit Session Tape. Move `session-tape.sqlite` and any adjacent `session-tape.sqlite-wal`, `session-tape.sqlite-shm` or `session-tape.sqlite-journal` files together into a separate folder for safekeeping.
+2. Copy the verified pre-upgrade file to the original folder and name the **copy** `session-tape.sqlite`.
+3. Open the restored copy with the app version that last read it successfully. To retry with the newer build, first address the reported error.
+
 ## Next milestones
 
 The goal is a reviewable record of human judgment, not an AI detector. Start with one end-to-end workflow: record a suggestion, the evidence you checked, and your decision; revisit it later; add a correction without rewriting the original; and share a report someone can read without the app.
