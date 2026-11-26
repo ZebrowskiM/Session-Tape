@@ -50,6 +50,16 @@ The main process owns both windows and the database. It uses `node:sqlite` suppl
 
 User data lives in `session-tape.sqlite` inside Electron’s per-user application-data folder for **Session Tape**. The app stores timestamps in UTC and displays them in the local time zone. Local storage relies on the device for at-rest protection.
 
+### Recover an archive after an upgrade failure
+
+Before upgrading an existing v1 or v2 archive, Session Tape saves a verified SQLite copy beside the live database. For a v2 archive the filename is `session-tape.sqlite.before-v2-upgrade.sqlite`. This file contains your notes and edit history, including committed changes in the SQLite write-ahead log. Each retry replaces the copy for that schema version only after verifying the new one. You can remove the recovery copy after checking the upgraded archive.
+
+If an upgrade fails, the app shows the error and, when available, the verified copy's path. Use these steps to recover the archive.
+
+1. Quit Session Tape. Move `session-tape.sqlite` and any adjacent `session-tape.sqlite-wal`, `session-tape.sqlite-shm` or `session-tape.sqlite-journal` files together into a separate folder for safekeeping.
+2. Copy the verified pre-upgrade file to the original folder and name the **copy** `session-tape.sqlite`.
+3. Open the restored copy with the app version that last read it successfully. To retry with the newer build, first address the reported error.
+
 ## Next milestones
 
 The goal is a reviewable record of human judgment, not an AI detector. Start with one end-to-end workflow: record a suggestion, the evidence you checked, and your decision; revisit it later; add a correction without rewriting the original; and share a report someone can read without the app.

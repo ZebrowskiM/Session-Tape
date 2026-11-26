@@ -2,9 +2,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
-const { mkdtempSync, rmSync } = require("node:fs");
+const { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
-const { join } = require("node:path");
+const { dirname, join } = require("node:path");
 const { Store } = require("../dist/store.js");
 
 function temporaryProfile(t) {
@@ -248,8 +248,7 @@ test("event pages use a per-session sequence and include events past the archive
   } finally { db.close(); }
 });
 
-test("v2 migration preserves original wording, all saved revisions and unknown clock data", t => {
-  const path = temporaryProfile(t);
+function seedV2(old) {
   const sessionId = randomUUID();
   const editedId = randomUUID();
   const plainId = randomUUID();
@@ -257,27 +256,33 @@ test("v2 migration preserves original wording, all saved revisions and unknown c
   const created = "2024-06-03T09:01:00.000Z";
   const revised = "2024-06-03T09:02:00.000Z";
   const later = "2024-06-04T11:20:00.000Z";
-  const old = new DatabaseSync(path);
   // A frozen v2 profile independent of the migration being tested.
+  old.exec(`
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT);
+    CREATE UNIQUE INDEX only_one_active ON sessions ((1)) WHERE finished_at IS NULL;
+    CREATE TABLE notes (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+      body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT);
+    CREATE INDEX notes_by_session ON notes(session_id);
+    CREATE TABLE note_versions (id INTEGER PRIMARY KEY, note_id TEXT NOT NULL REFERENCES notes(id),
+      body TEXT NOT NULL, saved_at TEXT NOT NULL);
+    CREATE INDEX note_versions_by_note ON note_versions(note_id);
+    PRAGMA user_version = 2;
+  `);
+  old.prepare("INSERT INTO sessions VALUES (?, 'CSV', ?, ?)").run(sessionId, start, revised);
+  const insert = old.prepare("INSERT INTO notes VALUES (?, ?, ?, ?, ?)");
+  insert.run(editedId, sessionId, "Only the delivery dates were blank.", created, later);
+  insert.run(plainId, sessionId, "Keep both orders.", created, null);
+  const version = old.prepare("INSERT INTO note_versions(note_id,body,saved_at) VALUES (?,?,?)");
+  version.run(editedId, "Two blank rows.", created);
+  version.run(editedId, "Two orders flagged.", revised);
+  return { sessionId, editedId, plainId, start, created, revised, later };
+}
+
+test("v2 migration preserves original wording, all saved revisions and unknown clock data", t => {
+  const path = temporaryProfile(t);
+  const old = new DatabaseSync(path);
+  const { sessionId, editedId, plainId, start, created, revised, later } = seedV2(old);
   try {
-    old.exec(`
-      CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT);
-      CREATE UNIQUE INDEX only_one_active ON sessions ((1)) WHERE finished_at IS NULL;
-      CREATE TABLE notes (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
-        body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT);
-      CREATE INDEX notes_by_session ON notes(session_id);
-      CREATE TABLE note_versions (id INTEGER PRIMARY KEY, note_id TEXT NOT NULL REFERENCES notes(id),
-        body TEXT NOT NULL, saved_at TEXT NOT NULL);
-      CREATE INDEX note_versions_by_note ON note_versions(note_id);
-      PRAGMA user_version = 2;
-    `);
-    old.prepare("INSERT INTO sessions VALUES (?, 'CSV', ?, ?)").run(sessionId, start, revised);
-    const insert = old.prepare("INSERT INTO notes VALUES (?, ?, ?, ?, ?)");
-    insert.run(editedId, sessionId, "Only the delivery dates were blank.", created, later);
-    insert.run(plainId, sessionId, "Keep both orders.", created, null);
-    const version = old.prepare("INSERT INTO note_versions(note_id,body,saved_at) VALUES (?,?,?)");
-    version.run(editedId, "Two blank rows.", created);
-    version.run(editedId, "Two orders flagged.", revised);
     // Simulate a damaged archive missing the timestamp of its latest edit.
     old.prepare("UPDATE notes SET updated_at = NULL WHERE id = ?").run(editedId);
     assert.throws(() => new Store(path), /NOT NULL constraint failed/);
@@ -334,4 +339,103 @@ test("live sequence follows commit order through a wall-clock rollback", t => {
     assert.deepEqual(events.map(e => e.sequence), [1, 2, 3]);
     assert.ok(events[2].elapsedMs >= events[1].elapsedMs);
   } finally { db.close(); }
+});
+
+test("a failed upgrade reports a standalone snapshot including edits committed only to the WAL", t => {
+  const path = temporaryProfile(t);
+  const snapshotPath = path + ".before-v2-upgrade.sqlite";
+  const writer = new DatabaseSync(path);
+  const { sessionId, editedId } = seedV2(writer);
+  try {
+    writer.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; PRAGMA wal_checkpoint(TRUNCATE);");
+    const checkpoint = readFileSync(path);
+    writer.prepare("UPDATE note_versions SET body = ? WHERE id = 1").run("Original in the WAL");
+    assert.deepEqual(readFileSync(path), checkpoint);
+    assert.ok(readFileSync(path + "-wal").length > 0);
+
+    const exec = DatabaseSync.prototype.exec;
+    const fault = t.mock.method(DatabaseSync.prototype, "exec", function (sql) {
+      if (sql === "PRAGMA user_version = 3") throw new Error("injected migration failure");
+      return exec.call(this, sql);
+    });
+    assert.throws(() => new Store(path), error =>
+      error.message.includes(snapshotPath) && error.message.includes("injected migration failure"));
+    fault.mock.restore();
+    assert.equal(writer.prepare("PRAGMA user_version").get().user_version, 2);
+
+    const restoredPath = temporaryProfile(t);
+    copyFileSync(snapshotPath, restoredPath);
+    const restored = new DatabaseSync(restoredPath, { readOnly: true });
+    try {
+      assert.equal(restored.prepare("PRAGMA user_version").get().user_version, 2);
+      for (const table of ["sessions", "notes", "note_versions"]) {
+        const sql = "SELECT rowid, * FROM " + table + " ORDER BY rowid";
+        assert.deepEqual(restored.prepare(sql).all(), writer.prepare(sql).all());
+      }
+    } finally { restored.close(); }
+    const store = new Store(restoredPath);
+    try {
+      const note = store.snapshot("").notes.find(n => n.id === editedId);
+      assert.deepEqual(note.versions.map(v => v.body),
+        ["Only the delivery dates were blank.", "Two orders flagged.", "Original in the WAL"]);
+      assert.equal(store.sessionEvents({ sessionId }).length, 6);
+    } finally { store.close(); }
+  } finally { writer.close(); }
+});
+
+test("a failed snapshot check preserves the last verified file and leaves the live schema alone", t => {
+  const path = temporaryProfile(t);
+  const snapshotPath = path + ".before-v2-upgrade.sqlite";
+  const writer = new DatabaseSync(path);
+  const { editedId, later } = seedV2(writer);
+  try {
+    writer.prepare("UPDATE notes SET updated_at = NULL WHERE id = ?").run(editedId);
+    assert.throws(() => new Store(path), /Upgrade failed/);
+    const goodCopy = readFileSync(snapshotPath);
+    writer.prepare("UPDATE notes SET updated_at = ? WHERE id = ?").run(later, editedId);
+    writer.exec("PRAGMA foreign_keys = OFF");
+    writer.prepare("UPDATE note_versions SET note_id = ? WHERE id = 1").run(randomUUID());
+    assert.throws(() => new Store(path), /Could not save and verify[\s\S]*broken record reference/);
+    assert.equal(writer.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(writer.prepare("SELECT 1 FROM sqlite_schema WHERE name='session_events'").get(), undefined);
+    assert.deepEqual(readFileSync(snapshotPath), goodCopy);
+    assert.equal(existsSync(snapshotPath + ".partial"), false);
+    writer.prepare("UPDATE note_versions SET note_id = ? WHERE id = 1").run(editedId);
+    const retried = new Store(path);
+    try { assert.equal(retried.snapshot("").notes.length, 2); } finally { retried.close(); }
+    const latest = new DatabaseSync(snapshotPath, { readOnly: true });
+    try {
+      assert.equal(latest.prepare("SELECT updated_at FROM notes WHERE id = ?").get(editedId).updated_at, later);
+    } finally { latest.close(); }
+  } finally { writer.close(); }
+});
+
+test("a publication error stops the upgrade and an interrupted staging file can be retried", t => {
+  const path = temporaryProfile(t);
+  const destination = path + ".before-v2-upgrade.sqlite";
+  const writer = new DatabaseSync(path);
+  try {
+    seedV2(writer);
+    // A directory blocks the final rename even on systems that ignore POSIX permissions.
+    mkdirSync(destination);
+    assert.throws(() => new Store(path), error =>
+      error.message.includes("Could not save and verify") && error.message.includes(destination));
+    assert.equal(writer.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(existsSync(destination + ".partial"), false);
+    rmSync(destination, { recursive: true });
+    writeFileSync(destination + ".partial", "interrupted copy");
+    const store = new Store(path);
+    try { assert.equal(store.snapshot("").notes.length, 2); } finally { store.close(); }
+    assert.equal(existsSync(destination + ".partial"), false);
+  } finally { writer.close(); }
+});
+
+test("fresh, current and unsupported newer profiles do not produce upgrade copies", t => {
+  const path = temporaryProfile(t);
+  new Store(path).close();
+  new Store(path).close();
+  const newer = new DatabaseSync(path);
+  try { newer.exec("PRAGMA user_version = 4"); } finally { newer.close(); }
+  assert.throws(() => new Store(path), /different version/);
+  assert.deepEqual(readdirSync(dirname(path)), ["session-tape.sqlite"]);
 });

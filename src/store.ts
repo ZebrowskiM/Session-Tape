@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { Note, NoteVersion, Session, SessionEvent, SessionEventData, Snapshot } from "./contracts";
+import { saveMigrationSnapshot } from "./migration-snapshot";
 import { migrateSessionEvents } from "./session-events";
 
 const CURRENT_SCHEMA_VERSION = 3;
@@ -28,6 +29,7 @@ export class Store {
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
+    let snapshotPath: string | undefined;
     try {
       this.db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
       const schemaVersion = this.db.prepare("PRAGMA user_version");
@@ -36,6 +38,10 @@ export class Store {
       this.db.exec("BEGIN IMMEDIATE");
       // Another connection may have completed the upgrade before we acquired the write lock.
       let version = schemaVersion.get()?.user_version;
+      if (typeof version === "number" && version > 0 && version < CURRENT_SCHEMA_VERSION) {
+        const sourcePath = this.db.location();
+        if (sourcePath) snapshotPath = saveMigrationSnapshot(sourcePath, version);
+      }
       if (version === 0) {
         this.db.exec(`
           CREATE TABLE sessions (
@@ -76,10 +82,17 @@ export class Store {
       } else if (version !== CURRENT_SCHEMA_VERSION) {
         throw new Error("This database was created by a different version of Session Tape.");
       }
+      if (this.db.prepare("PRAGMA foreign_key_check").get()) {
+        throw new Error("The upgraded archive contains a broken record reference.");
+      }
       this.db.exec("COMMIT");
     } catch (error) {
       // Closing the connection rolls back any uncommitted schema and data changes.
       this.db.close();
+      if (snapshotPath) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`Upgrade failed. The verified pre-upgrade copy is at\n${snapshotPath}\n\n${reason}`, { cause: error });
+      }
       throw error;
     }
   }
