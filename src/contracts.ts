@@ -24,6 +24,28 @@ export interface Snapshot {
   notes: Note[];
 }
 
+export type SessionEventData =
+  | { kind: "session.started"; payload: { title: string } }
+  | { kind: "session.finished"; payload: Record<string, never> }
+  | { kind: "note.added" | "note.edited"; payload: { noteId: string; body: string } };
+
+export type SessionEvent = SessionEventData & {
+  id: string;
+  sessionId: string;
+  sequence: number;
+  sequenceSource: "recorded" | "reconstructed";
+  occurredAt: string;
+  utcOffsetMinutes: number | null;
+  elapsedMs: number | null;
+  phase: "focus" | "finished" | null;
+  payloadVersion: 1;
+};
+
+export interface SessionEventQuery {
+  sessionId: string;
+  afterSequence?: number;
+}
+
 export interface NoteInput {
   id: string;
   sessionId: string;
@@ -41,6 +63,7 @@ export type View = "archive" | "panel";
 
 export interface SessionTape {
   snapshot(query: string): Promise<Reply<Snapshot>>;
+  sessionEvents(query: SessionEventQuery): Promise<Reply<SessionEvent[]>>;
   start(title: string): Promise<Reply<void>>;
   finish(sessionId: string): Promise<Reply<void>>;
   addNote(note: NoteInput): Promise<Reply<void>>;

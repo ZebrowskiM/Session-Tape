@@ -72,6 +72,7 @@ if (!app.requestSingleInstanceLock()) {
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, respond) => respond(false));
     session.defaultSession.setPermissionCheckHandler(() => false);
     register("archive:snapshot", query => db.snapshot(query));
+    register("session:events", query => db.sessionEvents(query));
     register("session:start", title => db.start(title), true);
     register("session:finish", id => db.finish(id), true);
     register("note:add", note => db.addNote(note), true);

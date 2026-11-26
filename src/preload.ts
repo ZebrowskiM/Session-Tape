@@ -3,6 +3,7 @@ import type { SessionTape } from "./contracts";
 
 const bridge: SessionTape = {
   snapshot: query => ipcRenderer.invoke("archive:snapshot", query),
+  sessionEvents: query => ipcRenderer.invoke("session:events", query),
   start: title => ipcRenderer.invoke("session:start", title),
   finish: id => ipcRenderer.invoke("session:finish", id),
   addNote: note => ipcRenderer.invoke("note:add", note),
