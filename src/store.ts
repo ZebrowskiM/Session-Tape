@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { Note, NoteVersion, Session, SessionEvent, SessionEventData, Snapshot } from "./contracts";
+import type { Note, NoteVersion, Session, SessionEvent, SessionEventData, SessionEventPage, Snapshot } from "./contracts";
 import { saveMigrationSnapshot } from "./migration-snapshot";
 import { migrateSessionEvents } from "./session-events";
 
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
+const EVENT_PAGE_SIZE = 100;
 
 export class InputError extends Error {}
 
@@ -24,6 +25,7 @@ function uuid(raw: unknown): string {
 
 export class Store {
   private readonly db: DatabaseSync;
+  readonly upgradeCopyPath: string | null = null;
   // Only the process that saw the session start has a monotonic origin.
   private clockOrigin: { sessionId: string; monotonicMs: number } | null = null;
 
@@ -76,9 +78,9 @@ export class Store {
         `);
         version = 2;
       }
-      if (version === 2) {
-        migrateSessionEvents(this.db);
-        this.db.exec("PRAGMA user_version = 3");
+      if (version === 2 || version === 3) {
+        migrateSessionEvents(this.db, version);
+        this.db.exec("PRAGMA user_version = 4");
       } else if (version !== CURRENT_SCHEMA_VERSION) {
         throw new Error("This database was created by a different version of Session Tape.");
       }
@@ -86,6 +88,7 @@ export class Store {
         throw new Error("The upgraded archive contains a broken record reference.");
       }
       this.db.exec("COMMIT");
+      this.upgradeCopyPath = snapshotPath ?? null;
     } catch (error) {
       // Closing the connection rolls back any uncommitted schema and data changes.
       this.db.close();
@@ -125,7 +128,7 @@ export class Store {
     return Math.floor(performance.now() - this.clockOrigin.monotonicMs);
   }
 
-  sessionEvents(raw: unknown): SessionEvent[] {
+  sessionEvents(raw: unknown): SessionEventPage {
     if (!raw || typeof raw !== "object") throw new InputError("Select a session.");
     const query = raw as Record<string, unknown>;
     const sessionId = uuid(query.sessionId);
@@ -137,9 +140,12 @@ export class Store {
       SELECT id, session_id AS sessionId, sequence, sequence_source AS sequenceSource, occurred_at AS occurredAt,
         utc_offset_minutes AS utcOffsetMinutes, elapsed_ms AS elapsedMs, phase,
         kind, payload_version AS payloadVersion, payload
-      FROM session_events WHERE session_id = ? AND sequence > ? ORDER BY sequence LIMIT 100
-    `).all(sessionId, after);
-    return rows.map(row => ({ ...row, payload: JSON.parse(row.payload as string) }) as SessionEvent);
+      FROM session_events WHERE session_id = ? AND sequence > ? ORDER BY sequence LIMIT ?
+    `).all(sessionId, after, EVENT_PAGE_SIZE + 1);
+    const events = rows.slice(0, EVENT_PAGE_SIZE).map(row =>
+      ({ ...row, payload: JSON.parse(row.payload as string) }) as SessionEvent);
+    const nextSequence = rows.length > EVENT_PAGE_SIZE ? events[events.length - 1].sequence : null;
+    return { events, nextSequence };
   }
 
   private active(): Session | null {

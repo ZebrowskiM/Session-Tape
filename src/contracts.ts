@@ -36,6 +36,7 @@ export type SessionEvent = SessionEventData & {
   sequenceSource: "recorded" | "reconstructed";
   occurredAt: string;
   utcOffsetMinutes: number | null;
+  // Process monotonic time since session start. Inclusion of system sleep depends on the OS.
   elapsedMs: number | null;
   phase: "focus" | "finished" | null;
   payloadVersion: 1;
@@ -44,6 +45,12 @@ export type SessionEvent = SessionEventData & {
 export interface SessionEventQuery {
   sessionId: string;
   afterSequence?: number;
+}
+
+export interface SessionEventPage {
+  events: SessionEvent[];
+  // Pass this as afterSequence for the next page. Null means this read reached the end.
+  nextSequence: number | null;
 }
 
 export interface NoteInput {
@@ -63,7 +70,7 @@ export type View = "archive" | "panel";
 
 export interface SessionTape {
   snapshot(query: string): Promise<Reply<Snapshot>>;
-  sessionEvents(query: SessionEventQuery): Promise<Reply<SessionEvent[]>>;
+  sessionEvents(query: SessionEventQuery): Promise<Reply<SessionEventPage>>;
   start(title: string): Promise<Reply<void>>;
   finish(sessionId: string): Promise<Reply<void>>;
   addNote(note: NoteInput): Promise<Reply<void>>;

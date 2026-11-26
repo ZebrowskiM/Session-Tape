@@ -148,6 +148,8 @@ test("upgrades existing version 1 databases without losing notes", t => {
 
   const db = new Store(path);
   try {
+    assert.equal(db.upgradeCopyPath, path + ".before-v1-upgrade.sqlite");
+    assert.ok(existsSync(db.upgradeCopyPath));
     const note = db.snapshot("").notes[0];
     assert.equal(note.id, noteId);
     assert.equal(note.body, "Existing note");
@@ -170,7 +172,7 @@ test("live event order and original IDs survive reopen, edits after finish and s
     const sessionId = db.snapshot("").active.id;
     const note = { id: randomUUID(), sessionId, body: "Keep both orders." };
     db.addNote(note);
-    const first = db.sessionEvents({ sessionId });
+    const first = db.sessionEvents({ sessionId }).events;
     assert.deepEqual(first.map(e => e.kind), ["session.started", "note.added"]);
     assert.equal(first[1].id, note.id);
     assert.equal(first[0].elapsedMs, 0);
@@ -179,7 +181,7 @@ test("live event order and original IDs survive reopen, edits after finish and s
     db.close();
     db = new Store(path);
     const query = { sessionId };
-    assert.deepEqual(db.sessionEvents(query), first);
+    assert.deepEqual(db.sessionEvents(query).events, first);
     db.addNote(note);
     db.finish(sessionId);
     const edit = { id: note.id, body: "Only the delivery dates were blank.",
@@ -188,7 +190,7 @@ test("live event order and original IDs survive reopen, edits after finish and s
     db.editNote(edit);
     db.addNote(note);
     assert.throws(() => db.addNote({ ...note, body: edit.body }), /different entry/);
-    const events = db.sessionEvents(query);
+    const events = db.sessionEvents(query).events;
     assert.deepEqual(events.map(e => e.sequence), [1, 2, 3, 4]);
     assert.deepEqual(events.map(e => e.kind), ["session.started", "note.added", "session.finished", "note.edited"]);
     assert.equal(events[2].elapsedMs, null);
@@ -198,7 +200,7 @@ test("live event order and original IDs survive reopen, edits after finish and s
     assert.ok(events.every(e => e.payloadVersion === 1 && e.sequenceSource === "recorded"));
     db.close();
     db = new Store(path);
-    assert.deepEqual(db.sessionEvents(query), events);
+    assert.deepEqual(db.sessionEvents(query).events, events);
   } finally { db.close(); }
 });
 
@@ -226,7 +228,7 @@ test("a rejected event rolls back the note, its version history and the sequence
     assert.deepEqual(db.snapshot("").notes[0], original);
     connection.exec("DROP TRIGGER fail_event");
     db.editNote(edit);
-    assert.deepEqual(db.sessionEvents({ sessionId }).map(e => e.sequence), [1, 2, 3]);
+    assert.deepEqual(db.sessionEvents({ sessionId }).events.map(e => e.sequence), [1, 2, 3]);
   } finally { connection.close(); db.close(); }
 });
 
@@ -239,11 +241,16 @@ test("event pages use a per-session sequence and include events past the archive
     db.finish(sessionId);
     db.start("Second session");
     const page = db.sessionEvents({ sessionId });
-    assert.equal(page.length, 100);
-    const next = db.sessionEvents({ sessionId, afterSequence: page.at(-1).sequence });
-    assert.deepEqual(next.map(e => e.sequence), [101, 102, 103]);
-    assert.deepEqual(db.sessionEvents({ sessionId, afterSequence: 103 }), []);
-    assert.deepEqual(db.sessionEvents({ sessionId: db.snapshot("").active.id }).map(e => e.sequence), [1]);
+    assert.equal(page.events.length, 100);
+    assert.equal(page.nextSequence, 100);
+    const next = db.sessionEvents({ sessionId, afterSequence: page.nextSequence });
+    assert.deepEqual(next.events.map(e => e.sequence), [101, 102, 103]);
+    assert.equal(next.nextSequence, null);
+    const exact = db.sessionEvents({ sessionId, afterSequence: 3 });
+    assert.equal(exact.events.length, 100);
+    assert.equal(exact.nextSequence, null);
+    assert.deepEqual(db.sessionEvents({ sessionId, afterSequence: 103 }), { events: [], nextSequence: null });
+    assert.deepEqual(db.sessionEvents({ sessionId: db.snapshot("").active.id }).events.map(e => e.sequence), [1]);
     assert.throws(() => db.sessionEvents({ sessionId, afterSequence: -1 }), /sequence/);
     assert.throws(() => db.sessionEvents({ sessionId: "unknown" }), /invalid ID/);
   } finally { db.close(); }
@@ -296,7 +303,7 @@ test("v2 migration preserves original wording, all saved revisions and unknown c
   let db = new Store(path);
   try {
     const query = { sessionId };
-    const events = db.sessionEvents(query);
+    const events = db.sessionEvents(query).events;
     assert.deepEqual(events.map(e => [e.kind, e.occurredAt, e.payload.body ?? e.payload.title]), [
       ["session.started", start, "CSV"],
       ["note.added", created, "Two blank rows."],
@@ -316,10 +323,10 @@ test("v2 migration preserves original wording, all saved revisions and unknown c
       ["Only the delivery dates were blank.", "Two orders flagged.", "Two blank rows."]);
     db.close();
     db = new Store(path);
-    assert.deepEqual(db.sessionEvents(query), events);
+    assert.deepEqual(db.sessionEvents(query).events, events);
     assert.deepEqual(db.snapshot(""), archive);
     db.addNote({ id: editedId, sessionId, body: "Two blank rows." });
-    assert.deepEqual(db.sessionEvents(query), events);
+    assert.deepEqual(db.sessionEvents(query).events, events);
   } finally { db.close(); }
 });
 
@@ -335,7 +342,7 @@ test("live sequence follows commit order through a wall-clock rollback", t => {
     const earlier = "2026-02-02T09:00:00.000Z";
     t.mock.timers.setTime(Date.parse(earlier));
     db.editNote({ id, body: "Second", expectedUpdatedAt: start });
-    const events = db.sessionEvents({ sessionId });
+    const events = db.sessionEvents({ sessionId }).events;
     assert.deepEqual(events.map(e => e.occurredAt), [start, start, earlier]);
     assert.deepEqual(events.map(e => e.sequence), [1, 2, 3]);
     assert.ok(events[2].elapsedMs >= events[1].elapsedMs);
@@ -356,7 +363,7 @@ test("a failed upgrade reports a standalone snapshot including edits committed o
 
     const exec = DatabaseSync.prototype.exec;
     const fault = t.mock.method(DatabaseSync.prototype, "exec", function (sql) {
-      if (sql === "PRAGMA user_version = 3") throw new Error("injected migration failure");
+      if (sql === "PRAGMA user_version = 4") throw new Error("injected migration failure");
       return exec.call(this, sql);
     });
     assert.throws(() => new Store(path), error =>
@@ -379,7 +386,7 @@ test("a failed upgrade reports a standalone snapshot including edits committed o
       const note = store.snapshot("").notes.find(n => n.id === editedId);
       assert.deepEqual(note.versions.map(v => v.body),
         ["Only the delivery dates were blank.", "Two orders flagged.", "Original in the WAL"]);
-      assert.equal(store.sessionEvents({ sessionId }).length, 6);
+      assert.equal(store.sessionEvents({ sessionId }).events.length, 6);
     } finally { store.close(); }
   } finally { writer.close(); }
 });
@@ -420,7 +427,8 @@ test("a publication error stops the upgrade and an interrupted staging file can 
     // A directory blocks the final rename even on systems that ignore POSIX permissions.
     mkdirSync(destination);
     assert.throws(() => new Store(path), error =>
-      error.message.includes("Could not save and verify") && error.message.includes(destination));
+      error.message.includes("Could not save and verify") && error.message.includes(destination) &&
+      error.message.includes("upgrade stopped before changing the archive"));
     assert.equal(writer.prepare("PRAGMA user_version").get().user_version, 2);
     assert.equal(existsSync(destination + ".partial"), false);
     rmSync(destination, { recursive: true });
@@ -436,7 +444,7 @@ test("fresh, current and unsupported newer profiles do not produce upgrade copie
   new Store(path).close();
   new Store(path).close();
   const newer = new DatabaseSync(path);
-  try { newer.exec("PRAGMA user_version = 4"); } finally { newer.close(); }
+  try { newer.exec("PRAGMA user_version = 5"); } finally { newer.close(); }
   assert.throws(() => new Store(path), /different version/);
   assert.deepEqual(readdirSync(dirname(path)), ["session-tape.sqlite"]);
 });
@@ -449,7 +457,7 @@ test("retry after process death between note commit and acknowledgement keeps th
   try {
     setup.start("Review flagged rows");
     sessionId = setup.snapshot("").active.id;
-    [startEvent] = setup.sessionEvents({ sessionId });
+    [startEvent] = setup.sessionEvents({ sessionId }).events;
   } finally { setup.close(); }
   const note = { id: randomUUID(), sessionId, body: "Keep both rows." };
   // Kill the writer before it can close the database or tell its caller the save succeeded.
@@ -471,7 +479,7 @@ test("retry after process death between note commit and acknowledgement keeps th
   const reopened = new Store(path);
   try {
     const archive = reopened.snapshot("");
-    const events = reopened.sessionEvents({ sessionId });
+    const events = reopened.sessionEvents({ sessionId }).events;
     assert.equal(archive.active.id, sessionId);
     assert.deepEqual(archive.notes.map(n => [n.id, n.body]), [[note.id, note.body]]);
     assert.equal(events.length, 2);
@@ -481,7 +489,7 @@ test("retry after process death between note commit and acknowledgement keeps th
     assert.equal(events[1].id, note.id);
     reopened.addNote(note);
     assert.deepEqual(reopened.snapshot(""), archive);
-    assert.deepEqual(reopened.sessionEvents({ sessionId }), events);
+    assert.deepEqual(reopened.sessionEvents({ sessionId }).events, events);
   } finally { reopened.close(); }
 });
 
@@ -516,7 +524,7 @@ test("a snapshot stays consistent when another connection edits and finishes dur
     assert.equal(after.active, null);
     assert.deepEqual(after.notes[0].versions.map(v => v.body), ["Only dates were blank.", "Two rows were flagged."]);
     assert.deepEqual(after, writer.snapshot(""));
-    assert.deepEqual(reader.sessionEvents({ sessionId }).map(e => [e.sequence, e.kind]), [
+    assert.deepEqual(reader.sessionEvents({ sessionId }).events.map(e => [e.sequence, e.kind]), [
       [1, "session.started"], [2, "note.added"], [3, "note.edited"], [4, "session.finished"],
     ]);
   } finally { writer.close(); reader.close(); }
@@ -544,10 +552,10 @@ test("a failed start releases the live session slot and a stale finish leaves th
     const nextId = first.snapshot("").active.id;
     assert.throws(() => second.finish(firstId), /already closed/);
     assert.equal(second.snapshot("").active.id, nextId);
-    assert.deepEqual(second.sessionEvents({ sessionId: firstId }).map(e => [e.sequence, e.kind]), [
+    assert.deepEqual(second.sessionEvents({ sessionId: firstId }).events.map(e => [e.sequence, e.kind]), [
       [1, "session.started"], [2, "session.finished"],
     ]);
-    assert.deepEqual(second.sessionEvents({ sessionId: nextId }).map(e => [e.sequence, e.kind]), [
+    assert.deepEqual(second.sessionEvents({ sessionId: nextId }).events.map(e => [e.sequence, e.kind]), [
       [1, "session.started"],
     ]);
   } finally { observer.close(); second.close(); first.close(); }
@@ -570,8 +578,8 @@ test("a migrated active session accepts live notes without inventing a clock ori
   const db = new Store(path);
   try {
     assert.equal(db.snapshot("").active.id, openId);
-    const closed = db.sessionEvents({ sessionId: closedId });
-    const history = db.sessionEvents({ sessionId: openId });
+    const closed = db.sessionEvents({ sessionId: closedId }).events;
+    const history = db.sessionEvents({ sessionId: openId }).events;
     assert.deepEqual(history.map(e => [e.sequence, e.kind, e.occurredAt]), [
       [1, "session.started", startedAt], [2, "note.added", startedAt],
     ]);
@@ -582,13 +590,125 @@ test("a migrated active session accepts live notes without inventing a clock ori
     const id = randomUUID();
     db.addNote({ id, sessionId: openId, body: "Follow-up entry." });
     db.finish(openId);
-    const events = db.sessionEvents({ sessionId: openId });
+    const events = db.sessionEvents({ sessionId: openId }).events;
     assert.deepEqual(events.slice(0, 2), history);
     assert.deepEqual(events.slice(2).map(e => [e.sequence, e.kind, e.sequenceSource, e.elapsedMs, e.phase]), [
       [3, "note.added", "recorded", null, null], [4, "session.finished", "recorded", null, "finished"],
     ]);
     assert.equal(events[2].id, id);
     assert.equal(events[2].utcOffsetMinutes + new Date(events[2].occurredAt).getTimezoneOffset(), 0);
-    assert.deepEqual(db.sessionEvents({ sessionId: closedId }), closed);
+    assert.deepEqual(db.sessionEvents({ sessionId: closedId }).events, closed);
+  } finally { db.close(); }
+});
+
+test("legacy replay preserves note creation and revision order across backward timestamps", t => {
+  const path = temporaryProfile(t);
+  const old = new DatabaseSync(path);
+  const { sessionId, editedId, created } = seedV2(old);
+  const early = "2024-06-03T08:15:00.000Z";
+  const earlier = "2024-06-03T08:00:00.000Z";
+  try {
+    old.prepare("UPDATE note_versions SET saved_at = ? WHERE id = 2").run(early);
+    old.prepare("UPDATE notes SET updated_at = ? WHERE id = ?").run(earlier, editedId);
+  } finally { old.close(); }
+
+  const db = new Store(path);
+  try {
+    const history = db.sessionEvents({ sessionId }).events.filter(e => e.payload.noteId === editedId);
+    assert.deepEqual(history.map(e => [e.kind, e.occurredAt, e.payload.body]), [
+      ["note.added", created, "Two blank rows."],
+      ["note.edited", early, "Two orders flagged."],
+      ["note.edited", earlier, "Only the delivery dates were blank."],
+    ]);
+  } finally { db.close(); }
+});
+
+test("v3 repair changes only reconstructed order and enforces the event vocabulary", t => {
+  const path = temporaryProfile(t);
+  const previous = new DatabaseSync(path);
+  const { sessionId, editedId, plainId, start, created, revised, later } = seedV2(previous);
+  const edit1 = editedId + ":edit:1";
+  const edit2 = editedId + ":edit:2";
+  const startId = sessionId + ":start";
+  const finishId = sessionId + ":finish";
+  const recordedId = plainId + ":edit:3";
+  const readRows = "SELECT * FROM session_events ORDER BY sequence";
+  let original;
+  try {
+    // The v3 preview had no CHECK on kind or phase. Its timestamp sort could
+    // put the latest edit first and leave a subsequently recorded suffix.
+    previous.exec(`
+      CREATE TABLE session_events (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+        sequence INTEGER NOT NULL, sequence_source TEXT NOT NULL, occurred_at TEXT NOT NULL,
+        utc_offset_minutes INTEGER, elapsed_ms INTEGER, phase TEXT, kind TEXT NOT NULL,
+        payload_version INTEGER NOT NULL, payload TEXT NOT NULL, UNIQUE(session_id, sequence)) STRICT;
+      PRAGMA user_version = 3;`);
+    const insert = previous.prepare(`INSERT INTO session_events VALUES (?, ?, ?, 'reconstructed', ?,
+      NULL, NULL, NULL, ?, 1, ?)`);
+    const rows = [
+      [startId, start, "session.started", { title: "CSV" }],
+      [edit2, start, "note.edited", { noteId: editedId, body: "Only the delivery dates were blank." }],
+      [editedId, created, "note.added", { noteId: editedId, body: "Two blank rows." }],
+      [plainId, created, "note.added", { noteId: plainId, body: "Keep both orders." }],
+      [finishId, revised, "session.finished", {}],
+      [edit1, later, "note.edited", { noteId: editedId, body: "Two orders flagged." }],
+    ];
+    for (const [i, [id, at, kind, payload]] of rows.entries()) {
+      insert.run(id, sessionId, i + 1, at, kind, JSON.stringify(payload));
+    }
+    previous.prepare(`INSERT INTO session_events VALUES (?, ?, 7, 'recorded', ?, -240,
+      NULL, 'finished', 'note.edited', 1, ?)`).run(recordedId, sessionId, later,
+      JSON.stringify({ noteId: plainId, body: "Reviewed." }));
+    original = previous.prepare(readRows).all();
+    previous.prepare("UPDATE session_events SET kind='typo' WHERE id=?").run(recordedId);
+    assert.throws(() => new Store(path), /Upgrade failed[\s\S]*CHECK constraint failed/);
+    assert.equal(previous.prepare("PRAGMA user_version").get().user_version, 3);
+    assert.equal(previous.prepare("SELECT kind FROM session_events WHERE id=?").get(recordedId).kind, "typo");
+    previous.prepare("UPDATE session_events SET kind='note.edited' WHERE id=?").run(recordedId);
+  } finally { previous.close(); }
+
+  const db = new Store(path);
+  try {
+    assert.equal(db.upgradeCopyPath, path + ".before-v3-upgrade.sqlite");
+    const raw = new DatabaseSync(path);
+    try {
+      const fixed = raw.prepare(readRows).all();
+      assert.deepEqual(fixed.map(e => e.id), [startId, editedId, plainId, finishId, edit1, edit2, recordedId]);
+      for (const [i, row] of fixed.entries()) {
+        const old = original.find(e => e.id === row.id);
+        assert.deepEqual({ ...row }, { ...old, sequence: i + 1 });
+      }
+      assert.deepEqual(fixed.at(-1), original.at(-1));
+      assert.throws(() => raw.exec("UPDATE session_events SET phase='unexpected'"), /CHECK constraint failed/);
+      assert.throws(() => raw.exec("UPDATE session_events SET kind='unexpected'"), /CHECK constraint failed/);
+      assert.equal(raw.prepare("PRAGMA user_version").get().user_version, 4);
+    } finally { raw.close(); }
+  } finally { db.close(); }
+  const reopened = new Store(path);
+  try {
+    assert.equal(reopened.upgradeCopyPath, null);
+    assert.ok(existsSync(path + ".before-v3-upgrade.sqlite"));
+  } finally { reopened.close(); }
+});
+
+test("a later original cannot push finish past a known post-finish edit or its revisions", t => {
+  const path = temporaryProfile(t);
+  const old = new DatabaseSync(path);
+  const { sessionId, editedId, plainId, start, later } = seedV2(old);
+  try {
+    old.prepare("UPDATE notes SET created_at=? WHERE id=?").run("2024-06-05T00:00:00.000Z", plainId);
+    old.prepare("INSERT INTO note_versions(note_id, body, saved_at) VALUES (?, ?, ?)")
+      .run(editedId, "After finish.", later);
+    old.prepare("UPDATE notes SET updated_at=? WHERE id=?").run(start, editedId);
+  } finally { old.close(); }
+  const db = new Store(path);
+  try {
+    const events = db.sessionEvents({ sessionId }).events;
+    const finish = events.findIndex(e => e.kind === "session.finished");
+    const original = events.findIndex(e => e.id === plainId);
+    assert.ok(original >= 0 && original < finish);
+    assert.deepEqual(events.slice(finish + 1).map(e => [e.kind, e.occurredAt, e.payload.body]), [
+      ["note.edited", later, "After finish."], ["note.edited", start, "Only the delivery dates were blank."],
+    ]);
   } finally { db.close(); }
 });

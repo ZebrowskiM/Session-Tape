@@ -8,13 +8,13 @@ const windows = new Map<View, BrowserWindow>();
 let store: Store | undefined;
 const page = join(__dirname, "../ui/index.html");
 
-function showWindow(view: View): void {
+function showWindow(view: View): BrowserWindow {
   const existing = windows.get(view);
   if (existing) {
     if (existing.isMinimized()) existing.restore();
     existing.show();
     existing.focus();
-    return;
+    return existing;
   }
 
   const compact = view === "panel";
@@ -40,6 +40,7 @@ function showWindow(view: View): void {
       win.destroy();
     }
   });
+  return win;
 }
 
 function register<T>(channel: string, run: (payload: unknown) => T, changes = false): void {
@@ -81,10 +82,24 @@ if (!app.requestSingleInstanceLock()) {
       if (view !== "archive" && view !== "panel") throw new InputError("Unknown window.");
       showWindow(view);
     });
-    showWindow("archive");
+    const archive = showWindow("archive");
+    const copy = db.upgradeCopyPath;
+    if (copy) {
+      archive.once("ready-to-show", () => {
+        void dialog.showMessageBox(archive, {
+          type: "info", title: "Session Tape", message: "Archive upgraded",
+          detail: `A recovery copy containing your notes and edit history is saved here.\n\n${copy}\n\n` +
+            "This file is unencrypted. After checking your upgraded archive, you can keep the copy or delete it.",
+          buttons: ["OK"],
+        });
+      });
+    }
     app.on("activate", () => showWindow("archive"));
   }).catch(error => {
-    dialog.showErrorBox("Could not open Session Tape", error instanceof Error ? error.message : "Check your local data folder.");
+    const reason = error instanceof Error ? error.message : String(error);
+    dialog.showErrorBox("Could not open Session Tape", reason + "\n\n" +
+      `Check free disk space and write access to the data folder, then retry.\n${app.getPath("userData")}\n\n` +
+      "To access an existing archive after a failed upgrade, use the app version that last opened it successfully.");
     app.quit();
   });
   app.on("window-all-closed", () => app.quit());

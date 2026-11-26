@@ -43,6 +43,6 @@ export function saveMigrationSnapshot(sourcePath: string, version: number): stri
     // Keep the original failure if the same filesystem error also prevents cleanup.
     try { rmSync(pending, { force: true }); } catch { /* retried on the next upgrade */ }
     const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Could not save and verify the pre-upgrade snapshot at ${destination}.\n${reason}`, { cause: error });
+    throw new Error(`Could not save and verify the pre-upgrade snapshot at ${destination}. The upgrade stopped before changing the archive.\n${reason}`, { cause: error });
   }
 }
