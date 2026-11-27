@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { Note, NoteVersion, Session, SessionEvent, SessionEventData, SessionEventPage, Snapshot } from "./contracts";
+import type { Note, NoteVersion, PhaseChange, PhaseTotals, Session, SessionEvent, SessionEventData, SessionEventPage, Snapshot } from "./contracts";
 import { saveMigrationSnapshot } from "./migration-snapshot";
 import { migrateSessionEvents } from "./session-events";
 
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 const EVENT_PAGE_SIZE = 100;
 
 export class InputError extends Error {}
@@ -25,18 +25,34 @@ function uuid(raw: unknown): string {
 
 export class Store {
   private readonly db: DatabaseSync;
-  readonly upgradeCopyPath: string | null = null;
+  readonly upgradeCopyPath: string | null;
   // Only the process that saw the session start has a monotonic origin.
   private clockOrigin: { sessionId: string; monotonicMs: number } | null = null;
 
-  constructor(path: string) {
+  private phaseAnchor: { sessionId: string; sequence: number; at: number } | null = null;
+
+  constructor(path: string, private readonly monotonicNow: () => number = () => performance.now()) {
     this.db = new DatabaseSync(path);
-    let snapshotPath: string | undefined;
     try {
       this.db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
-      const schemaVersion = this.db.prepare("PRAGMA user_version");
-      if (schemaVersion.get()?.user_version === CURRENT_SCHEMA_VERSION) return;
+      this.upgradeCopyPath = this.upgrade();
+      // Only intervals observed in this process can extend the last committed phase totals.
+      const active = this.active();
+      if (active?.phase) {
+        this.phaseAnchor = { sessionId: active.id, sequence: active.phaseSequence, at: Math.floor(this.monotonicNow()) };
+      }
+    } catch (error) {
+      // Closing rolls back any uncommitted migration.
+      this.db.close();
+      throw error;
+    }
+  }
 
+  private upgrade(): string | null {
+    const schemaVersion = this.db.prepare("PRAGMA user_version");
+    if (schemaVersion.get()?.user_version === CURRENT_SCHEMA_VERSION) return null;
+    let snapshotPath: string | undefined;
+    try {
       this.db.exec("BEGIN IMMEDIATE");
       // Another connection may have completed the upgrade before we acquired the write lock.
       let version = schemaVersion.get()?.user_version;
@@ -78,9 +94,9 @@ export class Store {
         `);
         version = 2;
       }
-      if (version === 2 || version === 3) {
+      if (version === 2 || version === 3 || version === 4) {
         migrateSessionEvents(this.db, version);
-        this.db.exec("PRAGMA user_version = 4");
+        this.db.exec("PRAGMA user_version = 5");
       } else if (version !== CURRENT_SCHEMA_VERSION) {
         throw new Error("This database was created by a different version of Session Tape.");
       }
@@ -88,10 +104,8 @@ export class Store {
         throw new Error("The upgraded archive contains a broken record reference.");
       }
       this.db.exec("COMMIT");
-      this.upgradeCopyPath = snapshotPath ?? null;
+      return snapshotPath ?? null;
     } catch (error) {
-      // Closing the connection rolls back any uncommitted schema and data changes.
-      this.db.close();
       if (snapshotPath) {
         const reason = error instanceof Error ? error.message : String(error);
         throw new Error(`Upgrade failed. The verified pre-upgrade copy is at\n${snapshotPath}\n\n${reason}`, { cause: error });
@@ -113,19 +127,20 @@ export class Store {
   }
 
   private appendEvent(id: string, sessionId: string, at: Date, event: SessionEventData,
-                      phase: SessionEvent["phase"], elapsedMs: number | null): void {
-    this.db.prepare(`
+                      phase: SessionEvent["phase"], elapsedMs: number | null): number {
+    const row = this.db.prepare(`
       INSERT INTO session_events
         (id, session_id, sequence, occurred_at, utc_offset_minutes, elapsed_ms, phase, kind, payload)
       SELECT ?, ?, COALESCE(MAX(sequence), 0) + 1, ?, ?, ?, ?, ?, ?
-      FROM session_events WHERE session_id = ?
-    `).run(id, sessionId, at.toISOString(), -at.getTimezoneOffset(), elapsedMs, phase,
+      FROM session_events WHERE session_id = ? RETURNING sequence
+    `).get(id, sessionId, at.toISOString(), -at.getTimezoneOffset(), elapsedMs, phase,
       event.kind, JSON.stringify(event.payload), sessionId);
+    return row!.sequence as number;
   }
 
-  private elapsed(sessionId: string): number | null {
+  private elapsed(sessionId: string, now = this.monotonicNow()): number | null {
     if (this.clockOrigin?.sessionId !== sessionId) return null;
-    return Math.floor(performance.now() - this.clockOrigin.monotonicMs);
+    return Math.floor(now) - this.clockOrigin.monotonicMs;
   }
 
   sessionEvents(raw: unknown): SessionEventPage {
@@ -149,10 +164,26 @@ export class Store {
   }
 
   private active(): Session | null {
-    const row = this.db.prepare(
-      "SELECT id, title, started_at AS startedAt FROM sessions WHERE finished_at IS NULL"
-    ).get();
+    const row = this.db.prepare(`
+      SELECT s.id, s.title, s.started_at AS startedAt, e.phase, e.sequence AS phaseSequence,
+        coalesce(json_extract(e.payload, '$.focusMs'), 0) AS focusMs,
+        coalesce(json_extract(e.payload, '$.pausedMs'), 0) AS pausedMs
+      FROM sessions s JOIN session_events e ON e.session_id = s.id
+      WHERE s.finished_at IS NULL AND e.kind IN ('session.started', 'session.paused', 'session.resumed')
+      ORDER BY e.sequence DESC LIMIT 1
+    `).get();
     return row ? row as unknown as Session : null;
+  }
+
+  private phaseTotals(active: Session, now: number): PhaseTotals {
+    const totals = { focusMs: active.focusMs, pausedMs: active.pausedMs };
+    const anchor = this.phaseAnchor;
+    if (anchor?.sessionId === active.id && anchor.sequence === active.phaseSequence) {
+      const duration = now - anchor.at;
+      if (active.phase === "focus") totals.focusMs += duration;
+      if (active.phase === "paused") totals.pausedMs += duration;
+    }
+    return totals;
   }
 
   snapshot(rawQuery: unknown): Snapshot {
@@ -195,31 +226,59 @@ export class Store {
 
   start(rawTitle: unknown): void {
     const title = textField(rawTitle, "session title", 120);
-    this.clockOrigin = this.transaction("write", () => {
+    const origin = this.transaction("write", () => {
       if (this.active()) throw new InputError("Finish the current session before starting another.");
       const sessionId = randomUUID();
       const at = new Date();
-      const monotonicMs = performance.now();
+      const monotonicMs = Math.floor(this.monotonicNow());
       this.db.prepare("INSERT INTO sessions(id, title, started_at) VALUES (?, ?, ?)")
         .run(sessionId, title, at.toISOString());
       this.appendEvent(sessionId + ":start", sessionId, at,
         { kind: "session.started", payload: { title } }, "focus", 0);
       return { sessionId, monotonicMs };
     });
+    this.clockOrigin = origin;
+    this.phaseAnchor = { sessionId: origin.sessionId, sequence: 1, at: origin.monotonicMs };
+  }
+
+  changePhase(raw: unknown): void {
+    if (!raw || typeof raw !== "object") throw new InputError("Select a session phase.");
+    const { sessionId, phase, expectedSequence } = raw as Partial<PhaseChange>;
+    const id = uuid(sessionId);
+    if ((phase !== "focus" && phase !== "paused") || typeof expectedSequence !== "number" ||
+        !Number.isSafeInteger(expectedSequence) || expectedSequence < 1) {
+      throw new InputError("Invalid phase change.");
+    }
+    const anchor = this.transaction("write", () => {
+      const active = this.active();
+      if (active?.id !== id) throw new InputError("That session is already closed or unavailable.");
+      if (active.phase === phase) return null;
+      if (active.phaseSequence !== expectedSequence) throw new InputError("The session phase changed. Try again.");
+      const now = Math.floor(this.monotonicNow());
+      const sequence = this.appendEvent(randomUUID(), id, new Date(), {
+        kind: phase === "paused" ? "session.paused" : "session.resumed",
+        payload: this.phaseTotals(active, now),
+      }, phase, this.elapsed(id, now));
+      return { sessionId: id, sequence, at: now };
+    });
+    if (anchor) this.phaseAnchor = anchor;
   }
 
   finish(rawId: unknown): void {
     const id = uuid(rawId);
     this.transaction("write", () => {
+      const active = this.active();
+      if (active?.id !== id) throw new InputError("That session is already closed or unavailable.");
+      const now = Math.floor(this.monotonicNow());
       const at = new Date();
-      const result = this.db.prepare(
+      this.db.prepare(
         "UPDATE sessions SET finished_at = ? WHERE id = ? AND finished_at IS NULL"
       ).run(at.toISOString(), id);
-      if (!result.changes) throw new InputError("That session is already closed or unavailable.");
-      this.appendEvent(id + ":finish", id, at, { kind: "session.finished", payload: {} },
-        "finished", this.elapsed(id));
+      this.appendEvent(id + ":finish", id, at, { kind: "session.finished", payload: this.phaseTotals(active, now) },
+        "finished", this.elapsed(id, now));
     });
     this.clockOrigin = null;
+    this.phaseAnchor = null;
   }
 
   addNote(raw: unknown): void {
@@ -244,7 +303,7 @@ export class Store {
       if (!result.changes) throw new InputError("This session has finished. Your text is still in the editor.");
       const elapsedMs = this.elapsed(sessionId);
       this.appendEvent(id, sessionId, at, { kind: "note.added", payload: { noteId: id, body } },
-        elapsedMs === null ? null : "focus", elapsedMs);
+        this.active()!.phase, elapsedMs);
     });
   }
 
@@ -276,7 +335,7 @@ export class Store {
       this.db.prepare("UPDATE notes SET body = ?, updated_at = ? WHERE id = ?").run(body, updatedAt, id);
       const sessionId = existing.session_id as string;
       const elapsedMs = existing.finished_at ? null : this.elapsed(sessionId);
-      const phase = existing.finished_at ? "finished" : elapsedMs === null ? null : "focus";
+      const phase = existing.finished_at ? "finished" : this.active()!.phase;
       this.appendEvent(id + ":edit:" + previous.lastInsertRowid, sessionId, at,
         { kind: "note.edited", payload: { noteId: id, body } }, phase, elapsedMs);
     });

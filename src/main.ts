@@ -75,6 +75,7 @@ if (!app.requestSingleInstanceLock()) {
     register("archive:snapshot", query => db.snapshot(query));
     register("session:events", query => db.sessionEvents(query));
     register("session:start", title => db.start(title), true);
+    register("session:phase", input => db.changePhase(input), true);
     register("session:finish", id => db.finish(id), true);
     register("note:add", note => db.addNote(note), true);
     register("note:edit", note => db.editNote(note), true);

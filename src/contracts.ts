@@ -1,4 +1,19 @@
-export interface Session {
+export type SessionPhase = "focus" | "paused";
+export interface PhaseTotals {
+  focusMs: number;
+  pausedMs: number;
+}
+
+export interface PhaseChange {
+  sessionId: string;
+  phase: SessionPhase;
+  expectedSequence: number;
+}
+
+export interface Session extends PhaseTotals {
+  // Totals cover measured intervals through the last phase change.
+  phase: SessionPhase | null;
+  phaseSequence: number;
   id: string;
   title: string;
   startedAt: string;
@@ -26,7 +41,8 @@ export interface Snapshot {
 
 export type SessionEventData =
   | { kind: "session.started"; payload: { title: string } }
-  | { kind: "session.finished"; payload: Record<string, never> }
+  | { kind: "session.paused" | "session.resumed"; payload: PhaseTotals }
+  | { kind: "session.finished"; payload: PhaseTotals | Record<string, never> }
   | { kind: "note.added" | "note.edited"; payload: { noteId: string; body: string } };
 
 export type SessionEvent = SessionEventData & {
@@ -38,7 +54,7 @@ export type SessionEvent = SessionEventData & {
   utcOffsetMinutes: number | null;
   // Process monotonic time since session start. Inclusion of system sleep depends on the OS.
   elapsedMs: number | null;
-  phase: "focus" | "finished" | null;
+  phase: SessionPhase | "finished" | null;
   payloadVersion: 1;
 };
 
@@ -72,6 +88,7 @@ export interface SessionTape {
   snapshot(query: string): Promise<Reply<Snapshot>>;
   sessionEvents(query: SessionEventQuery): Promise<Reply<SessionEventPage>>;
   start(title: string): Promise<Reply<void>>;
+  changePhase(input: PhaseChange): Promise<Reply<void>>;
   finish(sessionId: string): Promise<Reply<void>>;
   addNote(note: NoteInput): Promise<Reply<void>>;
   editNote(note: NoteEditInput): Promise<Reply<void>>;

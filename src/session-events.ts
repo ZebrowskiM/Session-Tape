@@ -30,11 +30,11 @@ const legacyNotes = `
 const legacyV3Events = `
   SELECT id, session_id, occurred_at, kind, payload, CASE WHEN kind = 'note.edited'
     THEN CAST(substr(id, instr(id, ':edit:') + 6) AS INTEGER) ELSE sequence END AS source_row
-  FROM session_events_v3 WHERE sequence_source = 'reconstructed'
+  FROM previous_session_events WHERE sequence_source = 'reconstructed'
 `;
 
-export function migrateSessionEvents(db: DatabaseSync, version: 2 | 3): void {
-  if (version === 3) db.exec("ALTER TABLE session_events RENAME TO session_events_v3");
+export function migrateSessionEvents(db: DatabaseSync, version: 2 | 3 | 4): void {
+  if (version >= 3) db.exec("ALTER TABLE session_events RENAME TO previous_session_events");
   db.exec(`
     CREATE TABLE session_events (
       id TEXT PRIMARY KEY,
@@ -44,14 +44,25 @@ export function migrateSessionEvents(db: DatabaseSync, version: 2 | 3): void {
       occurred_at TEXT NOT NULL,
       utc_offset_minutes INTEGER,
       elapsed_ms INTEGER CHECK (elapsed_ms >= 0),
-      phase TEXT CHECK (phase IN ('focus', 'finished')),
-      kind TEXT NOT NULL CHECK (kind IN ('session.started', 'note.added', 'note.edited', 'session.finished')),
+      phase TEXT CHECK (phase IN ('focus', 'paused', 'finished')),
+      kind TEXT NOT NULL CHECK (kind IN ('session.started', 'session.paused', 'session.resumed', 'note.added', 'note.edited', 'session.finished')),
       payload_version INTEGER NOT NULL DEFAULT 1,
       payload TEXT NOT NULL CHECK (json_valid(payload)),
       UNIQUE (session_id, sequence)
     ) STRICT;
   `);
 
+  db.exec(`CREATE INDEX session_phase_events ON session_events(session_id, sequence DESC)
+    WHERE kind IN ('session.started', 'session.paused', 'session.resumed')`);
+  if (version === 4) {
+    // v4 already has the final replay order. Rebuild only to widen its CHECK constraints.
+    db.exec(`INSERT INTO session_events (id, session_id, sequence, sequence_source, occurred_at,
+        utc_offset_minutes, elapsed_ms, phase, kind, payload_version, payload)
+      SELECT id, session_id, sequence, sequence_source, occurred_at, utc_offset_minutes, elapsed_ms,
+        phase, kind, payload_version, payload FROM previous_session_events;
+      DROP TABLE previous_session_events;`);
+    return;
+  }
   const insert = version === 2 ? `
     INSERT INTO session_events (id, session_id, sequence, sequence_source, occurred_at, kind, payload)
     SELECT id, session_id, sequence, 'reconstructed', occurred_at, kind, payload FROM numbered
@@ -60,7 +71,7 @@ export function migrateSessionEvents(db: DatabaseSync, version: 2 | 3): void {
       utc_offset_minutes, elapsed_ms, phase, kind, payload_version, payload)
     SELECT e.id, e.session_id, COALESCE(n.sequence, e.sequence), e.sequence_source, e.occurred_at,
       e.utc_offset_minutes, e.elapsed_ms, e.phase, e.kind, e.payload_version, e.payload
-    FROM session_events_v3 e LEFT JOIN numbered n ON n.id = e.id
+    FROM previous_session_events e LEFT JOIN numbered n ON n.id = e.id
   `;
   db.exec(`
     WITH legacy AS (${version === 2 ? legacyNotes : legacyV3Events}),
@@ -90,5 +101,5 @@ export function migrateSessionEvents(db: DatabaseSync, version: 2 | 3): void {
     )
     ${insert}
   `);
-  if (version === 3) db.exec("DROP TABLE session_events_v3");
+  if (version === 3) db.exec("DROP TABLE previous_session_events");
 }

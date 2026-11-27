@@ -2,7 +2,7 @@
 
 Session Tape is a local-first desktop notebook for documenting the human decisions behind AI-assisted code, research, and document review. Write down what was suggested, what you checked, and what you decided so someone else can follow your reasoning later.
 
-**Available now:** named sessions, timestamped notes from the archive or compact panel, searchable notes, and timestamped version history. Both windows use the same local SQLite database. Timeline replay, linked corrections, and export verification are planned.
+**Available now:** focus and pause controls in both windows, named sessions, timestamped notes from the archive or compact panel, searchable notes, and timestamped version history. Both windows use the same local SQLite database. Timeline replay, linked corrections, and export verification are planned.
 
 ## Run locally
 
@@ -21,6 +21,8 @@ The first setup and Electron runtime download need internet access. After instal
 2. Select **Open panel**, type “Only the delivery dates were blank,” and press **Ctrl+Enter** or **Cmd+Enter**. Wait for **Note saved**.
 3. Return to the archive and search for **delivery**. The note shows its session and local display time. Use **Edit** to update it; its earlier text and save time remain in version history.
 4. Close both windows and relaunch. The active session and saved note are restored. **Finish session** closes it to new entries and keeps its notes searchable.
+
+Use **Pause** or **Resume focus** in either window. A note saved or edited during a pause carries the paused phase. Phase changes and Finish record the measured focus and pause totals. Reopening an archive starts a new observation interval and preserves the last committed totals. Time between observations is unknown.
 
 Draft text stays in the editing window until saved. Closing the window discards that unsaved text. The archive shows the newest 100 matching notes. Search uses literal substrings and SQLite’s built-in case folding. The compact panel requests always-on-top on Windows, macOS and Linux X11. The archive contains the same editor on Wayland.
 
@@ -56,7 +58,7 @@ Recorded events use the process monotonic clock for `elapsedMs`. Whether that cl
 
 ### Recover an archive after an upgrade failure
 
-Before changing an existing archive, Session Tape saves a verified copy beside the live database. Depending on the source schema, the filename is `session-tape.sqlite.before-v1-upgrade.sqlite`, `session-tape.sqlite.before-v2-upgrade.sqlite`, or `session-tape.sqlite.before-v3-upgrade.sqlite` for the v3 preview. The copy includes committed changes in SQLite’s write-ahead log. The app holds the SQLite write lock during copying, verification, and migration so another writer cannot change the archive between those steps. Large archives can take longer to open.
+Before changing an existing archive, Session Tape saves a verified copy beside the live database. Depending on the source schema, the filename is `session-tape.sqlite.before-v1-upgrade.sqlite`, `session-tape.sqlite.before-v2-upgrade.sqlite`, `session-tape.sqlite.before-v3-upgrade.sqlite`, or `session-tape.sqlite.before-v4-upgrade.sqlite`. The copy includes committed changes in SQLite’s write-ahead log. The app holds the SQLite write lock during copying, verification, and migration so another writer cannot change the archive between those steps. Large archives can take longer to open.
 
 After a successful upgrade the app shows the recovery file’s path. The file contains your unencrypted notes and edit history. Keep it until you have checked the upgraded archive, then delete it if you no longer need it. Each upgrade retry replaces the copy for that source version only after verifying the new copy.
 

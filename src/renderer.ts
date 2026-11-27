@@ -12,6 +12,7 @@ const titleField = element<HTMLInputElement>("title");
 const bodyField = element<HTMLTextAreaElement>("note");
 const searchField = element<HTMLInputElement>("search");
 const saveButton = element<HTMLButtonElement>("save-note");
+const phaseButton = element<HTMLButtonElement>("change-phase");
 const finishButton = element<HTMLButtonElement>("finish");
 const clearDraft = element<HTMLButtonElement>("clear-draft");
 const notice = element("status");
@@ -54,6 +55,10 @@ async function refresh(): Promise<void> {
     startForm.hidden = Boolean(active);
     element("session").hidden = !active;
     element("session-name").textContent = active?.title ?? "";
+    if (active) {
+      element("phase-name").textContent = active.phase === "focus" ? "Focus" : active.phase === "paused" ? "Paused" : "Phase unknown";
+      phaseButton.textContent = active.phase === "focus" ? "Pause" : "Resume focus";
+    }
     controls();
     if (panel) return;
     const list = element("notes");
@@ -185,6 +190,17 @@ startForm.addEventListener("submit", async event => {
     bodyField.focus();
   }
   button.disabled = false;
+});
+
+phaseButton.addEventListener("click", async () => {
+  if (!active || phaseButton.disabled) return;
+  phaseButton.disabled = true;
+  const phase = active.phase === "focus" ? "paused" : "focus";
+  if (await apply(api.changePhase({ sessionId: active.id, phase, expectedSequence: active.phaseSequence }))) {
+    showStatus(phase === "paused" ? "Session paused." : "Focus resumed.");
+  }
+  await refresh();
+  phaseButton.disabled = false;
 });
 
 finishButton.addEventListener("click", async () => {

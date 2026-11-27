@@ -25,7 +25,8 @@ button:disabled { opacity: .55; cursor: wait; }
 #shortcut, #status, #empty { color: #465e58; font-size: 13px; }
 #status { min-height: 1.4em; margin: 7px 1px 16px; }
 #status.error { color: #922d1c; }
-.session-head { margin-bottom: 16px; }
+.session-head { margin-bottom: 8px; }
+.phase-controls { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
 .archive-head { flex-wrap: wrap; margin-bottom: 10px; }
 #search { flex: 0 1 245px; }
 #notes { list-style: none; padding: 0; margin: 0; }

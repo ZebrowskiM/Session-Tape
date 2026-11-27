@@ -363,7 +363,7 @@ test("a failed upgrade reports a standalone snapshot including edits committed o
 
     const exec = DatabaseSync.prototype.exec;
     const fault = t.mock.method(DatabaseSync.prototype, "exec", function (sql) {
-      if (sql === "PRAGMA user_version = 4") throw new Error("injected migration failure");
+      if (sql === "PRAGMA user_version = 5") throw new Error("injected migration failure");
       return exec.call(this, sql);
     });
     assert.throws(() => new Store(path), error =>
@@ -444,7 +444,7 @@ test("fresh, current and unsupported newer profiles do not produce upgrade copie
   new Store(path).close();
   new Store(path).close();
   const newer = new DatabaseSync(path);
-  try { newer.exec("PRAGMA user_version = 5"); } finally { newer.close(); }
+  try { newer.exec("PRAGMA user_version = 6"); } finally { newer.close(); }
   assert.throws(() => new Store(path), /different version/);
   assert.deepEqual(readdirSync(dirname(path)), ["session-tape.sqlite"]);
 });
@@ -681,7 +681,7 @@ test("v3 repair changes only reconstructed order and enforces the event vocabula
       assert.deepEqual(fixed.at(-1), original.at(-1));
       assert.throws(() => raw.exec("UPDATE session_events SET phase='unexpected'"), /CHECK constraint failed/);
       assert.throws(() => raw.exec("UPDATE session_events SET kind='unexpected'"), /CHECK constraint failed/);
-      assert.equal(raw.prepare("PRAGMA user_version").get().user_version, 4);
+      assert.equal(raw.prepare("PRAGMA user_version").get().user_version, 5);
     } finally { raw.close(); }
   } finally { db.close(); }
   const reopened = new Store(path);
@@ -710,5 +710,94 @@ test("a later original cannot push finish past a known post-finish edit or its r
     assert.deepEqual(events.slice(finish + 1).map(e => [e.kind, e.occurredAt, e.payload.body]), [
       ["note.edited", later, "After finish."], ["note.edited", start, "Only the delivery dates were blank."],
     ]);
+  } finally { db.close(); }
+});
+
+test("pause and resume track separate totals and tag notes in the shared active phase", t => {
+  const path = temporaryProfile(t);
+  let now = 100;
+  const db = new Store(path, () => now);
+  const reader = new Store(path);
+  try {
+    db.start("CSV handoff");
+    const session = db.snapshot("").active;
+    const sessionId = session.id;
+    assert.equal(session.phase, "focus");
+    const command = { sessionId, phase: "paused", expectedSequence: session.phaseSequence };
+    now += 1200;
+    db.changePhase(command);
+    const paused = reader.snapshot("").active;
+    assert.deepEqual(paused, db.snapshot("").active);
+    assert.deepEqual([paused.phase, paused.focusMs, paused.pausedMs], ["paused", 1200, 0]);
+    const note = { id: randomUUID(), sessionId, body: "Checked while paused." };
+    now += 400;
+    db.addNote(note);
+    const saved = reader.snapshot("").notes[0];
+    db.editNote({ id: note.id, body: "Corrected while paused.", expectedUpdatedAt: saved.updatedAt });
+    db.changePhase(command); // Lost acknowledgement for Pause.
+    now += 300;
+    db.changePhase({ sessionId, phase: "focus", expectedSequence: paused.phaseSequence });
+    const resumed = reader.snapshot("").active;
+    assert.deepEqual([resumed.phase, resumed.focusMs, resumed.pausedMs], ["focus", 1200, 700]);
+    assert.throws(() => db.changePhase(command), /phase changed/);
+    now += 500;
+    db.finish(sessionId);
+    const events = reader.sessionEvents({ sessionId }).events;
+    assert.deepEqual(events.map(e => [e.kind, e.phase, e.elapsedMs]), [
+      ["session.started", "focus", 0], ["session.paused", "paused", 1200],
+      ["note.added", "paused", 1600], ["note.edited", "paused", 1600],
+      ["session.resumed", "focus", 1900], ["session.finished", "finished", 2400],
+    ]);
+    assert.deepEqual(events.at(-1).payload, { focusMs: 1700, pausedMs: 700 });
+    assert.throws(() => db.changePhase(command), /already closed/);
+  } finally { reader.close(); db.close(); }
+});
+
+test("a rejected phase change keeps the clock anchor and skips no sequence", t => {
+  const path = temporaryProfile(t);
+  let now = 0;
+  const db = new Store(path, () => now);
+  const raw = new DatabaseSync(path);
+  try {
+    db.start("Atomic pause");
+    const { id, phaseSequence } = db.snapshot("").active;
+    const pause = { sessionId: id, expectedSequence: phaseSequence, phase: "paused" };
+    now = 500;
+    raw.exec(`CREATE TRIGGER reject_pause BEFORE INSERT ON session_events WHEN NEW.kind='session.paused'
+      BEGIN SELECT RAISE(ABORT, 'pause failed'); END;`);
+    assert.throws(() => db.changePhase(pause), /pause failed/);
+    assert.equal(db.snapshot("").active.phase, "focus");
+    raw.exec("DROP TRIGGER reject_pause");
+    now = 900;
+    db.changePhase(pause);
+    now = 1400;
+    db.finish(id);
+    const { events } = db.sessionEvents({ sessionId: id });
+    assert.deepEqual(events.map(e => e.sequence), [1, 2, 3]);
+    assert.deepEqual(events.at(-1).payload, { focusMs: 900, pausedMs: 500 });
+  } finally { raw.close(); db.close(); }
+});
+
+test("reopening preserves paused notes and excludes downtime from measured totals", t => {
+  const path = temporaryProfile(t);
+  let now = 0;
+  let db = new Store(path, () => now);
+  try {
+    db.start("Restart");
+    const { id, phaseSequence } = db.snapshot("").active;
+    now = 800;
+    db.changePhase({ sessionId: id, phase: "paused", expectedSequence: phaseSequence });
+    db.close();
+    now = 90000;
+    db = new Store(path, () => now);
+    const paused = db.snapshot("").active;
+    assert.equal(paused.phase, "paused");
+    db.addNote({ id: randomUUID(), sessionId: id, body: "Still paused." });
+    now += 200;
+    db.changePhase({ sessionId: id, phase: "focus", expectedSequence: paused.phaseSequence });
+    const { events } = db.sessionEvents({ sessionId: id });
+    assert.equal(events.at(-2).phase, "paused");
+    assert.equal(events.at(-1).elapsedMs, null);
+    assert.deepEqual(events.at(-1).payload, { focusMs: 800, pausedMs: 200 });
   } finally { db.close(); }
 });
