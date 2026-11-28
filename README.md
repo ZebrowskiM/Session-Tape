@@ -2,7 +2,7 @@
 
 Session Tape is a local-first desktop notebook for documenting the human decisions behind AI-assisted code, research, and document review. Write down what was suggested, what you checked, and what you decided so someone else can follow your reasoning later.
 
-**Available now:** focus and pause controls in both windows, named sessions, timestamped notes from the archive or compact panel, searchable notes, and timestamped version history. Both windows use the same local SQLite database. Timeline replay, linked corrections, and export verification are planned.
+**Available now:** focus, pause and timed breaks in both windows, named sessions, timestamped notes from the archive or compact panel, searchable notes, and timestamped version history. Both windows use the same local SQLite database. Timeline replay, linked corrections, and export verification are planned.
 
 ## Run locally
 
@@ -22,7 +22,9 @@ The first setup and Electron runtime download need internet access. After instal
 3. Return to the archive and search for **delivery**. The note shows its session and local display time. Use **Edit** to update it; its earlier text and save time remain in version history.
 4. Close both windows and relaunch. The active session and saved note are restored. **Finish session** closes it to new entries and keeps its notes searchable.
 
-Use **Pause** or **Resume focus** in either window. A note saved or edited during a pause carries the paused phase. Phase changes and Finish record the measured focus and pause totals. Reopening an archive starts a new observation interval and preserves the last committed totals. Time between observations is unknown.
+Use **Pause** or **Resume focus** in either window. During focus, choose 5, 10, 15 or a custom number of whole minutes and select **Start break**. Both windows show the countdown. **End early** returns to focus immediately. If the app stays open, expiry returns to focus at the scheduled boundary. **Finish session** in the archive closes an active break and ends the session.
+
+Notes and edits carry the phase in which you saved them. Each phase change checkpoints measured focus, break and pause time. A break end records its reason, its effective time and the time the app processed it. Reopening before the deadline restores the remaining countdown. Reopening after the deadline records the overdue break and leaves the session paused until you resume. Time while the app was closed is excluded from the measured totals.
 
 Draft text stays in the editing window until saved. Closing the window discards that unsaved text. The archive shows the newest 100 matching notes. Search uses literal substrings and SQLite’s built-in case folding. The compact panel requests always-on-top on Windows, macOS and Linux X11. The archive contains the same editor on Wayland.
 
@@ -56,9 +58,11 @@ Read a session’s history with `sessionEvents({ sessionId, afterSequence })`. A
 
 Recorded events use the process monotonic clock for `elapsedMs`. Whether that clock advances during system sleep depends on the OS. Use the per-session sequence for replay. An unknown elapsed time is stored as null.
 
+For a `break.ended` event, `elapsedMs` locates the effective boundary on the session clock when known. The payload links back to the break’s start sequence. `effectiveAt` is the scheduled deadline for expiry or the time of a manual end. `processedAt` and `occurredAt` give the time the app handled the transition.
+
 ### Recover an archive after an upgrade failure
 
-Before changing an existing archive, Session Tape saves a verified copy beside the live database. Depending on the source schema, the filename is `session-tape.sqlite.before-v1-upgrade.sqlite`, `session-tape.sqlite.before-v2-upgrade.sqlite`, `session-tape.sqlite.before-v3-upgrade.sqlite`, or `session-tape.sqlite.before-v4-upgrade.sqlite`. The copy includes committed changes in SQLite’s write-ahead log. The app holds the SQLite write lock during copying, verification, and migration so another writer cannot change the archive between those steps. Large archives can take longer to open.
+Before changing an existing archive, Session Tape saves a verified copy beside the live database. The filename includes the source schema version, from `session-tape.sqlite.before-v1-upgrade.sqlite` through `session-tape.sqlite.before-v5-upgrade.sqlite`. The copy includes committed changes in SQLite’s write-ahead log. The app holds the SQLite write lock during copying, verification, and migration so another writer cannot change the archive between those steps. Large archives can take longer to open.
 
 After a successful upgrade the app shows the recovery file’s path. The file contains your unencrypted notes and edit history. Keep it until you have checked the upgraded archive, then delete it if you no longer need it. Each upgrade retry replaces the copy for that source version only after verifying the new copy.
 
@@ -79,7 +83,7 @@ The goal is a reviewable record of human judgment, not an AI detector. Start wit
    - **Optional signing:** Later, add a detached digital signature over the finished bundle. Keep the private key out of the export and verify offline against a public key the recipient trusts independently of the bundle. A key shipped alongside the export is not by itself a trust source. Label untrusted keys separately from invalid signatures.
    - **What this does not prove:** Files remain editable, and a matching digest or valid signature does not prove who wrote a note, that the review happened, that the report is complete, or whether AI was used. An optional [trusted timestamp](https://www.rfc-editor.org/rfc/rfc3161.html) could establish that the bundle existed by a certain time, not when individual entries were made.
 
-Focus and break controls, [portable backups](https://github.com/ZebrowskiM/Session-Tape/issues/13), and cross-platform packaging remain on the roadmap. They support the workflow without being its main purpose.
+Live session totals, [portable backups](https://github.com/ZebrowskiM/Session-Tape/issues/13), and cross-platform packaging remain on the roadmap.
 
 ## License
 

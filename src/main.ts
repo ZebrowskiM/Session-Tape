@@ -6,6 +6,7 @@ import { InputError, Store } from "./store";
 
 const windows = new Map<View, BrowserWindow>();
 let store: Store | undefined;
+let breakTimeout: NodeJS.Timeout | undefined;
 const page = join(__dirname, "../ui/index.html");
 
 function showWindow(view: View): BrowserWindow {
@@ -43,7 +44,27 @@ function showWindow(view: View): BrowserWindow {
   return win;
 }
 
-function register<T>(channel: string, run: (payload: unknown) => T, changes = false): void {
+function notifyWindows(phaseOnly: boolean): void {
+  for (const win of windows.values()) win.webContents.send("archive:changed", phaseOnly);
+}
+
+function scheduleBreak(db: Store): void {
+  clearTimeout(breakTimeout);
+  const remaining = db.breakRemainingMs();
+  if (remaining === null) return;
+  const expire = () => {
+    try {
+      if (db.expireBreak()) notifyWindows(true);
+      scheduleBreak(db);
+    } catch (error) {
+      console.error("Could not record the break deadline.", error);
+      breakTimeout = setTimeout(expire, 1000);
+    }
+  };
+  breakTimeout = setTimeout(expire, Math.min(remaining, 2_147_483_647));
+}
+
+function register<T>(channel: string, run: (payload: unknown) => T, changes?: "archive" | "phase"): void {
   ipcMain.handle(channel, (event, payload: unknown): Reply<T> => {
     const trusted = [...windows.entries()].some(([view, win]) =>
       win.webContents === event.sender && event.senderFrame === win.webContents.mainFrame &&
@@ -53,7 +74,8 @@ function register<T>(channel: string, run: (payload: unknown) => T, changes = fa
     try {
       const value = run(payload);
       if (changes) {
-        for (const win of windows.values()) win.webContents.send("archive:changed");
+        notifyWindows(changes === "phase");
+        scheduleBreak(store!);
       }
       return { ok: true, value };
     } catch (error) {
@@ -70,15 +92,17 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     const db = new Store(join(app.getPath("userData"), "session-tape.sqlite"));
     store = db;
+    scheduleBreak(db);
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, respond) => respond(false));
     session.defaultSession.setPermissionCheckHandler(() => false);
     register("archive:snapshot", query => db.snapshot(query));
     register("session:events", query => db.sessionEvents(query));
-    register("session:start", title => db.start(title), true);
-    register("session:phase", input => db.changePhase(input), true);
-    register("session:finish", id => db.finish(id), true);
-    register("note:add", note => db.addNote(note), true);
-    register("note:edit", note => db.editNote(note), true);
+    register("session:start", title => db.start(title), "archive");
+    register("session:phase", input => db.changePhase(input), "phase");
+    register("session:break", input => db.startBreak(input), "phase");
+    register("session:finish", id => db.finish(id), "archive");
+    register("note:add", note => db.addNote(note), "archive");
+    register("note:edit", note => db.editNote(note), "archive");
     register("window:show", view => {
       if (view !== "archive" && view !== "panel") throw new InputError("Unknown window.");
       showWindow(view);
@@ -104,5 +128,8 @@ if (!app.requestSingleInstanceLock()) {
     app.quit();
   });
   app.on("window-all-closed", () => app.quit());
-  app.on("will-quit", () => store?.close());
+  app.on("will-quit", () => {
+    clearTimeout(breakTimeout);
+    store?.close();
+  });
 }

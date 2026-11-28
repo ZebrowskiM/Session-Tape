@@ -13,6 +13,10 @@ const bodyField = element<HTMLTextAreaElement>("note");
 const searchField = element<HTMLInputElement>("search");
 const saveButton = element<HTMLButtonElement>("save-note");
 const phaseButton = element<HTMLButtonElement>("change-phase");
+const breakForm = element<HTMLFormElement>("break-form");
+const breakLength = element<HTMLSelectElement>("break-length");
+const customMinutes = element<HTMLInputElement>("break-minutes");
+const countdown = element("countdown");
 const finishButton = element<HTMLButtonElement>("finish");
 const clearDraft = element<HTMLButtonElement>("clear-draft");
 const notice = element("status");
@@ -24,6 +28,8 @@ let editDraft = "";
 let editSaving = false;
 let reading = 0;
 let saving = false;
+let notesPending = true;
+let countdownInterval: number | undefined;
 
 document.body.classList.toggle("panel", panel);
 element("heading").textContent = panel ? "Quick note" : "Session archive";
@@ -45,22 +51,44 @@ function controls(): void {
   if (orphan) showStatus("The original session is closed. Copy this draft or clear it to continue.", true);
 }
 
-async function refresh(): Promise<void> {
+function showCountdown(remaining: number | null): void {
+  window.clearInterval(countdownInterval);
+  countdown.hidden = remaining === null;
+  if (remaining === null) return;
+  const deadline = performance.now() + remaining;
+  const tick = () => {
+    const seconds = Math.max(0, Math.ceil((deadline - performance.now()) / 1000));
+    countdown.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  };
+  tick();
+  countdownInterval = window.setInterval(tick, 250);
+}
+
+async function refresh(phaseOnly = false): Promise<void> {
+  if (!phaseOnly) notesPending = true;
   const generation = ++reading;
   try {
     const result = await api.snapshot(panel ? "" : searchField.value);
     if (generation !== reading) return;
     if (!result.ok) { showStatus(result.error, true); return; }
+    const previous = active;
     active = result.value.active;
+    if (previous?.phase === "break" && previous.id === active?.id && active.phase === "focus") {
+      showStatus("Focus resumed.");
+    }
     startForm.hidden = Boolean(active);
     element("session").hidden = !active;
     element("session-name").textContent = active?.title ?? "";
+    showCountdown(result.value.breakRemainingMs);
+    breakForm.hidden = active?.phase !== "focus";
     if (active) {
-      element("phase-name").textContent = active.phase === "focus" ? "Focus" : active.phase === "paused" ? "Paused" : "Phase unknown";
-      phaseButton.textContent = active.phase === "focus" ? "Pause" : "Resume focus";
+      const labels = { focus: "Focus", paused: "Paused", break: "Break" };
+      element("phase-name").textContent = active.phase ? labels[active.phase] : "Phase unknown";
+      phaseButton.textContent = active.phase === "break" ? "End early" : active.phase === "focus" ? "Pause" : "Resume focus";
     }
     controls();
-    if (panel) return;
+    if (panel || !notesPending) return;
+    notesPending = false;
     const list = element("notes");
     const cards = result.value.notes.map(note => {
       const row = document.createElement("li");
@@ -199,8 +227,28 @@ phaseButton.addEventListener("click", async () => {
   if (await apply(api.changePhase({ sessionId: active.id, phase, expectedSequence: active.phaseSequence }))) {
     showStatus(phase === "paused" ? "Session paused." : "Focus resumed.");
   }
-  await refresh();
+  await refresh(true);
   phaseButton.disabled = false;
+});
+
+breakLength.addEventListener("change", () => {
+  const custom = breakLength.value === "custom";
+  customMinutes.hidden = customMinutes.disabled = !custom;
+  customMinutes.required = custom;
+});
+
+breakForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (active?.phase !== "focus") return;
+  const button = element<HTMLButtonElement>("start-break");
+  if (button.disabled) return;
+  button.disabled = true;
+  const minutes = breakLength.value === "custom" ? customMinutes.valueAsNumber : Number(breakLength.value);
+  if (await apply(api.startBreak({ sessionId: active.id, expectedSequence: active.phaseSequence, minutes }))) {
+    showStatus("Break started.");
+  }
+  await refresh(true);
+  button.disabled = false;
 });
 
 finishButton.addEventListener("click", async () => {
@@ -253,6 +301,6 @@ bodyField.addEventListener("keydown", event => {
 });
 element("switch").addEventListener("click", () => { void apply(api.show(panel ? "archive" : "panel")); });
 searchField.addEventListener("input", () => void refresh());
-const unsubscribe = api.onChange(() => void refresh());
+const unsubscribe = api.onChange(phaseOnly => void refresh(phaseOnly));
 window.addEventListener("pagehide", unsubscribe, { once: true });
 void refresh();

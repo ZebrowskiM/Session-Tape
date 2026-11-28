@@ -27,6 +27,10 @@ button:disabled { opacity: .55; cursor: wait; }
 #status.error { color: #922d1c; }
 .session-head { margin-bottom: 8px; }
 .phase-controls { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+#break-form { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+#break-length { font: inherit; color: inherit; background: white; padding: 8px; border: 1px solid #a8b2a6; border-radius: 6px; }
+#break-minutes { flex: 0 1 6em; }
+#countdown { font-variant-numeric: tabular-nums; }
 .archive-head { flex-wrap: wrap; margin-bottom: 10px; }
 #search { flex: 0 1 245px; }
 #notes { list-style: none; padding: 0; margin: 0; }

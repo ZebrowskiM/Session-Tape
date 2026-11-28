@@ -1,13 +1,25 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { Note, NoteVersion, PhaseChange, PhaseTotals, Session, SessionEvent, SessionEventData, SessionEventPage, Snapshot } from "./contracts";
+import type { BreakEndReason, BreakRequest, Note, NoteVersion, PhaseChange, PhaseTarget, PhaseTotals, Session, SessionEvent, SessionEventData, SessionEventPage, Snapshot } from "./contracts";
 import { saveMigrationSnapshot } from "./migration-snapshot";
-import { migrateSessionEvents } from "./session-events";
+import { migrateSessionEvents, phaseEventKinds } from "./session-events";
 
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 6;
 const EVENT_PAGE_SIZE = 100;
 
 export class InputError extends Error {}
+
+interface BreakTimer {
+  deadline: number; // Monotonic time in this process.
+  overdueOnOpen: boolean;
+}
+
+interface PhaseAnchor {
+  sessionId: string;
+  sequence: number;
+  at: number;
+  timer?: BreakTimer;
+}
 
 function textField(raw: unknown, name: string, maxLength: number, allowEmpty = false): string {
   if (typeof raw !== "string" || raw.length > maxLength || (!allowEmpty && !raw.trim())) {
@@ -23,13 +35,27 @@ function uuid(raw: unknown): string {
   return raw;
 }
 
+function checkTarget(active: Session | null, id: string, sequence: number): asserts active is Session {
+  if (active?.id !== id) throw new InputError("That session is already closed or unavailable.");
+  if (active.phaseSequence !== sequence) throw new InputError("The session phase changed. Try again.");
+}
+
+function phaseTarget(raw: unknown): PhaseTarget {
+  if (!raw || typeof raw !== "object") throw new InputError("Select a session phase.");
+  const { sessionId, expectedSequence } = raw as Partial<PhaseTarget>;
+  if (typeof expectedSequence !== "number" || !Number.isSafeInteger(expectedSequence) || expectedSequence < 1) {
+    throw new InputError("Invalid phase change.");
+  }
+  return { sessionId: uuid(sessionId), expectedSequence };
+}
+
 export class Store {
   private readonly db: DatabaseSync;
   readonly upgradeCopyPath: string | null;
   // Only the process that saw the session start has a monotonic origin.
   private clockOrigin: { sessionId: string; monotonicMs: number } | null = null;
 
-  private phaseAnchor: { sessionId: string; sequence: number; at: number } | null = null;
+  private phaseAnchor: PhaseAnchor | null = null;
 
   constructor(path: string, private readonly monotonicNow: () => number = () => performance.now()) {
     this.db = new DatabaseSync(path);
@@ -39,7 +65,10 @@ export class Store {
       // Only intervals observed in this process can extend the last committed phase totals.
       const active = this.active();
       if (active?.phase) {
-        this.phaseAnchor = { sessionId: active.id, sequence: active.phaseSequence, at: Math.floor(this.monotonicNow()) };
+        const now = Math.floor(this.monotonicNow());
+        const timer = active.phase === "break" ? this.breakTimer(active, now, new Date()) : undefined;
+        this.phaseAnchor = { sessionId: active.id, sequence: active.phaseSequence, at: now, timer };
+        if (timer?.overdueOnOpen) this.expireBreak();
       }
     } catch (error) {
       // Closing rolls back any uncommitted migration.
@@ -94,9 +123,9 @@ export class Store {
         `);
         version = 2;
       }
-      if (version === 2 || version === 3 || version === 4) {
+      if (version === 2 || version === 3 || version === 4 || version === 5) {
         migrateSessionEvents(this.db, version);
-        this.db.exec("PRAGMA user_version = 5");
+        this.db.exec("PRAGMA user_version = 6");
       } else if (version !== CURRENT_SCHEMA_VERSION) {
         throw new Error("This database was created by a different version of Session Tape.");
       }
@@ -115,12 +144,14 @@ export class Store {
   }
 
   private transaction<T>(mode: "read" | "write", action: () => T): T {
+    const originalAnchor = this.phaseAnchor;
     this.db.exec(mode === "write" ? "BEGIN IMMEDIATE" : "BEGIN");
     try {
       const result = action();
       this.db.exec("COMMIT");
       return result;
     } catch (error) {
+      this.phaseAnchor = originalAnchor;
       if (this.db.isTransaction) this.db.exec("ROLLBACK");
       throw error;
     }
@@ -167,23 +198,79 @@ export class Store {
     const row = this.db.prepare(`
       SELECT s.id, s.title, s.started_at AS startedAt, e.phase, e.sequence AS phaseSequence,
         coalesce(json_extract(e.payload, '$.focusMs'), 0) AS focusMs,
-        coalesce(json_extract(e.payload, '$.pausedMs'), 0) AS pausedMs
+        coalesce(json_extract(e.payload, '$.pausedMs'), 0) AS pausedMs,
+        coalesce(json_extract(e.payload, '$.breakMs'), 0) AS breakMs,
+        json_extract(e.payload, '$.deadlineAt') AS breakDeadlineAt,
+        json_extract(e.payload, '$.durationMs') AS breakDurationMs
       FROM sessions s JOIN session_events e ON e.session_id = s.id
-      WHERE s.finished_at IS NULL AND e.kind IN ('session.started', 'session.paused', 'session.resumed')
+      WHERE s.finished_at IS NULL AND e.kind IN (${phaseEventKinds})
       ORDER BY e.sequence DESC LIMIT 1
     `).get();
     return row ? row as unknown as Session : null;
   }
 
   private phaseTotals(active: Session, now: number): PhaseTotals {
-    const totals = { focusMs: active.focusMs, pausedMs: active.pausedMs };
+    const totals = { focusMs: active.focusMs, pausedMs: active.pausedMs, breakMs: active.breakMs };
     const anchor = this.phaseAnchor;
     if (anchor?.sessionId === active.id && anchor.sequence === active.phaseSequence) {
       const duration = now - anchor.at;
       if (active.phase === "focus") totals.focusMs += duration;
       if (active.phase === "paused") totals.pausedMs += duration;
+      if (active.phase === "break") totals.breakMs += duration;
     }
     return totals;
+  }
+
+  private breakTimer(active: Session, now: number, at: Date): BreakTimer {
+    const anchor = this.phaseAnchor;
+    if (anchor?.sessionId === active.id && anchor.sequence === active.phaseSequence && anchor.timer) {
+      return anchor.timer;
+    }
+    // Across processes only the persisted UTC deadline survives. Count from this observation.
+    const remaining = Math.min(active.breakDurationMs!, Date.parse(active.breakDeadlineAt!) - at.getTime());
+    return { deadline: now + Math.max(0, remaining), overdueOnOpen: remaining <= 0 };
+  }
+
+  breakRemainingMs(active = this.active()): number | null {
+    if (active?.phase !== "break") return null;
+    const now = Math.floor(this.monotonicNow());
+    return Math.max(0, this.breakTimer(active, now, new Date()).deadline - now);
+  }
+
+  private endBreak(active: Session, reason: BreakEndReason, boundary: number, processed: Date): PhaseTotals {
+    const expired = reason === "expired" || reason === "overdue-on-reopen";
+    const effectiveAt = expired ? active.breakDeadlineAt! : processed.toISOString();
+    const phase = reason === "finish" ? "finished" : reason === "overdue-on-reopen" ? "paused" : "focus";
+    const totals = this.phaseTotals(active, boundary);
+    const sequence = this.appendEvent(`${active.id}:break-end:${active.phaseSequence}`, active.id, processed, {
+      kind: "break.ended",
+      payload: { ...totals, startSequence: active.phaseSequence, reason, effectiveAt, processedAt: processed.toISOString() },
+    }, phase, this.elapsed(active.id, boundary));
+    this.phaseAnchor = { sessionId: active.id, sequence, at: boundary };
+    return totals;
+  }
+
+  private settleBreak(active: Session | null, now: number, at: Date): boolean {
+    if (active?.phase !== "break") return false;
+    const timer = this.breakTimer(active, now, at);
+    if (now < timer.deadline) return false;
+    this.endBreak(active, timer.overdueOnOpen ? "overdue-on-reopen" : "expired", timer.deadline, at);
+    return true;
+  }
+
+  expireBreak(): boolean {
+    return this.transaction("write", () => this.settleBreak(this.active(), Math.floor(this.monotonicNow()), new Date()));
+  }
+
+  // A save, phase command or Finish can reach the write lock before the scheduled callback.
+  private writeTimed<T>(action: (active: Session | null, now: number, at: Date) => T): T {
+    return this.transaction("write", () => {
+      const active = this.active();
+      const now = Math.floor(this.monotonicNow());
+      const at = new Date();
+      const expired = this.settleBreak(active, now, at);
+      return action(expired ? this.active() : active, now, at);
+    });
   }
 
   snapshot(rawQuery: unknown): Snapshot {
@@ -221,7 +308,8 @@ export class Store {
         ];
       }
     }
-    return { active: this.active(), notes };
+    const active = this.active();
+    return { active, breakRemainingMs: this.breakRemainingMs(active), notes };
   }
 
   start(rawTitle: unknown): void {
@@ -242,39 +330,53 @@ export class Store {
   }
 
   changePhase(raw: unknown): void {
-    if (!raw || typeof raw !== "object") throw new InputError("Select a session phase.");
-    const { sessionId, phase, expectedSequence } = raw as Partial<PhaseChange>;
-    const id = uuid(sessionId);
-    if ((phase !== "focus" && phase !== "paused") || typeof expectedSequence !== "number" ||
-        !Number.isSafeInteger(expectedSequence) || expectedSequence < 1) {
-      throw new InputError("Invalid phase change.");
-    }
-    const anchor = this.transaction("write", () => {
-      const active = this.active();
-      if (active?.id !== id) throw new InputError("That session is already closed or unavailable.");
-      if (active.phase === phase) return null;
-      if (active.phaseSequence !== expectedSequence) throw new InputError("The session phase changed. Try again.");
-      const now = Math.floor(this.monotonicNow());
-      const sequence = this.appendEvent(randomUUID(), id, new Date(), {
+    const { sessionId: id, expectedSequence } = phaseTarget(raw);
+    const { phase } = raw as Partial<PhaseChange>;
+    if (phase !== "focus" && phase !== "paused") throw new InputError("Invalid phase change.");
+    this.writeTimed((active, now, at) => {
+      if (active?.id === id && active.phase === phase) return;
+      checkTarget(active, id, expectedSequence);
+      if (active.phase === "break") {
+        if (phase !== "focus") throw new InputError("End the break before pausing.");
+        this.endBreak(active, "early", now, at);
+        return;
+      }
+      const sequence = this.appendEvent(randomUUID(), id, at, {
         kind: phase === "paused" ? "session.paused" : "session.resumed",
         payload: this.phaseTotals(active, now),
       }, phase, this.elapsed(id, now));
-      return { sessionId: id, sequence, at: now };
+      this.phaseAnchor = { sessionId: id, sequence, at: now };
     });
-    if (anchor) this.phaseAnchor = anchor;
+  }
+
+  startBreak(raw: unknown): void {
+    const { sessionId, expectedSequence } = phaseTarget(raw);
+    const { minutes } = raw as Partial<BreakRequest>;
+    if (typeof minutes !== "number" || !Number.isSafeInteger(minutes) || minutes < 1) {
+      throw new InputError("Enter a positive whole number of minutes.");
+    }
+    const durationMs = minutes * 60000;
+    this.writeTimed((active, now, at) => {
+      checkTarget(active, sessionId, expectedSequence);
+      if (active.phase !== "focus") throw new InputError("Resume focus before starting a break.");
+      const deadline = new Date(at.getTime() + durationMs);
+      if (!Number.isFinite(deadline.getTime())) throw new InputError("This break duration is too long.");
+      const sequence = this.appendEvent(randomUUID(), sessionId, at, {
+        kind: "break.started", payload: { ...this.phaseTotals(active, now), durationMs, deadlineAt: deadline.toISOString() },
+      }, "break", this.elapsed(sessionId, now));
+      this.phaseAnchor = { sessionId, sequence, at: now, timer: { deadline: now + durationMs, overdueOnOpen: false } };
+    });
   }
 
   finish(rawId: unknown): void {
     const id = uuid(rawId);
-    this.transaction("write", () => {
-      const active = this.active();
+    this.writeTimed((active, now, at) => {
       if (active?.id !== id) throw new InputError("That session is already closed or unavailable.");
-      const now = Math.floor(this.monotonicNow());
-      const at = new Date();
+      const totals = active.phase === "break" ? this.endBreak(active, "finish", now, at) : this.phaseTotals(active, now);
       this.db.prepare(
         "UPDATE sessions SET finished_at = ? WHERE id = ? AND finished_at IS NULL"
       ).run(at.toISOString(), id);
-      this.appendEvent(id + ":finish", id, at, { kind: "session.finished", payload: this.phaseTotals(active, now) },
+      this.appendEvent(id + ":finish", id, at, { kind: "session.finished", payload: totals },
         "finished", this.elapsed(id, now));
     });
     this.clockOrigin = null;
@@ -287,7 +389,7 @@ export class Store {
     const id = uuid(fields.id);
     const sessionId = uuid(fields.sessionId);
     const body = textField(fields.body, "note", 16000);
-    this.transaction("write", () => {
+    this.writeTimed((active, now, at) => {
       const original = this.db.prepare(`
         SELECT session_id, json_extract(payload, '$.body') AS body FROM session_events WHERE id = ?
       `).get(id);
@@ -295,15 +397,14 @@ export class Store {
         if (original.session_id === sessionId && original.body === body) return;
         throw new InputError("This note ID already belongs to a different entry.");
       }
-      const at = new Date();
       const result = this.db.prepare(`
         INSERT INTO notes(id, session_id, body, created_at)
         SELECT ?, id, ?, ? FROM sessions WHERE id = ? AND finished_at IS NULL
       `).run(id, body, at.toISOString(), sessionId);
       if (!result.changes) throw new InputError("This session has finished. Your text is still in the editor.");
-      const elapsedMs = this.elapsed(sessionId);
+      const elapsedMs = this.elapsed(sessionId, now);
       this.appendEvent(id, sessionId, at, { kind: "note.added", payload: { noteId: id, body } },
-        this.active()!.phase, elapsedMs);
+        active!.phase, elapsedMs);
     });
   }
 
@@ -314,7 +415,7 @@ export class Store {
     const body = textField(fields.body, "note", 16000);
     const expectedUpdatedAt = textField(fields.expectedUpdatedAt, "note version", 40);
 
-    this.transaction("write", () => {
+    this.writeTimed((active, now, at) => {
       const existing = this.db.prepare(`
         SELECT n.body, n.created_at, n.updated_at, n.session_id, s.finished_at
         FROM notes n JOIN sessions s ON s.id = n.session_id WHERE n.id = ?
@@ -326,7 +427,6 @@ export class Store {
         throw new InputError("This note changed elsewhere. Reload it before saving your edit.");
       }
 
-      const at = new Date();
       const currentTime = Date.parse(currentVersion);
       const updatedAt = new Date(Math.max(at.getTime(), currentTime + 1)).toISOString();
       const previous = this.db.prepare(
@@ -334,8 +434,8 @@ export class Store {
       ).run(id, existing.body, currentVersion);
       this.db.prepare("UPDATE notes SET body = ?, updated_at = ? WHERE id = ?").run(body, updatedAt, id);
       const sessionId = existing.session_id as string;
-      const elapsedMs = existing.finished_at ? null : this.elapsed(sessionId);
-      const phase = existing.finished_at ? "finished" : this.active()!.phase;
+      const elapsedMs = existing.finished_at ? null : this.elapsed(sessionId, now);
+      const phase = existing.finished_at ? "finished" : active!.phase;
       this.appendEvent(id + ":edit:" + previous.lastInsertRowid, sessionId, at,
         { kind: "note.edited", payload: { noteId: id, body } }, phase, elapsedMs);
     });

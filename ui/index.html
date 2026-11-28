@@ -22,7 +22,19 @@
       </form>
       <div id="session" hidden>
         <div class="session-head"><h2 id="session-name"></h2><button type="button" id="finish" class="quiet">Finish session</button></div>
-        <div class="phase-controls"><span id="phase-name"></span><button type="button" id="change-phase" class="quiet">Pause</button></div>
+        <div class="phase-controls">
+          <span id="phase-name"></span><span id="countdown" role="timer" aria-label="Break time remaining" hidden></span>
+          <button type="button" id="change-phase" class="quiet">Pause</button>
+        </div>
+        <form id="break-form" hidden>
+          <label class="sr-only" for="break-length">Break length</label>
+          <select id="break-length">
+            <option value="5">5 minutes</option><option value="10">10 minutes</option>
+            <option value="15">15 minutes</option><option value="custom">Custom</option>
+          </select>
+          <input id="break-minutes" type="number" min="1" step="1" placeholder="Minutes" aria-label="Custom break in minutes" disabled hidden>
+          <button id="start-break" class="quiet">Start break</button>
+        </form>
       </div>
       <form id="note-form" hidden>
         <label for="note">Quick note</label>

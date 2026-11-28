@@ -363,7 +363,7 @@ test("a failed upgrade reports a standalone snapshot including edits committed o
 
     const exec = DatabaseSync.prototype.exec;
     const fault = t.mock.method(DatabaseSync.prototype, "exec", function (sql) {
-      if (sql === "PRAGMA user_version = 5") throw new Error("injected migration failure");
+      if (sql === "PRAGMA user_version = 6") throw new Error("injected migration failure");
       return exec.call(this, sql);
     });
     assert.throws(() => new Store(path), error =>
@@ -444,7 +444,7 @@ test("fresh, current and unsupported newer profiles do not produce upgrade copie
   new Store(path).close();
   new Store(path).close();
   const newer = new DatabaseSync(path);
-  try { newer.exec("PRAGMA user_version = 6"); } finally { newer.close(); }
+  try { newer.exec("PRAGMA user_version = 7"); } finally { newer.close(); }
   assert.throws(() => new Store(path), /different version/);
   assert.deepEqual(readdirSync(dirname(path)), ["session-tape.sqlite"]);
 });
@@ -681,7 +681,7 @@ test("v3 repair changes only reconstructed order and enforces the event vocabula
       assert.deepEqual(fixed.at(-1), original.at(-1));
       assert.throws(() => raw.exec("UPDATE session_events SET phase='unexpected'"), /CHECK constraint failed/);
       assert.throws(() => raw.exec("UPDATE session_events SET kind='unexpected'"), /CHECK constraint failed/);
-      assert.equal(raw.prepare("PRAGMA user_version").get().user_version, 5);
+      assert.equal(raw.prepare("PRAGMA user_version").get().user_version, 6);
     } finally { raw.close(); }
   } finally { db.close(); }
   const reopened = new Store(path);
@@ -748,7 +748,7 @@ test("pause and resume track separate totals and tag notes in the shared active 
       ["note.added", "paused", 1600], ["note.edited", "paused", 1600],
       ["session.resumed", "focus", 1900], ["session.finished", "finished", 2400],
     ]);
-    assert.deepEqual(events.at(-1).payload, { focusMs: 1700, pausedMs: 700 });
+    assert.deepEqual(events.at(-1).payload, { focusMs: 1700, pausedMs: 700, breakMs: 0 });
     assert.throws(() => db.changePhase(command), /already closed/);
   } finally { reader.close(); db.close(); }
 });
@@ -774,7 +774,7 @@ test("a rejected phase change keeps the clock anchor and skips no sequence", t =
     db.finish(id);
     const { events } = db.sessionEvents({ sessionId: id });
     assert.deepEqual(events.map(e => e.sequence), [1, 2, 3]);
-    assert.deepEqual(events.at(-1).payload, { focusMs: 900, pausedMs: 500 });
+    assert.deepEqual(events.at(-1).payload, { focusMs: 900, pausedMs: 500, breakMs: 0 });
   } finally { raw.close(); db.close(); }
 });
 
@@ -798,6 +798,50 @@ test("reopening preserves paused notes and excludes downtime from measured total
     const { events } = db.sessionEvents({ sessionId: id });
     assert.equal(events.at(-2).phase, "paused");
     assert.equal(events.at(-1).elapsedMs, null);
-    assert.deepEqual(events.at(-1).payload, { focusMs: 800, pausedMs: 200 });
+    assert.deepEqual(events.at(-1).payload, { focusMs: 800, pausedMs: 200, breakMs: 0 });
+  } finally { db.close(); }
+});
+
+test("upgrading a v5 phase index preserves old checkpoints and accepts timed breaks", t => {
+  const path = temporaryProfile(t);
+  const sessionId = randomUUID();
+  const stamp = "2026-01-01T00:00:00.000Z";
+  new Store(path).close();
+  const old = new DatabaseSync(path);
+  const read = "SELECT * FROM session_events ORDER BY sequence";
+  let before;
+  try {
+    old.exec(`DROP TABLE session_events;
+      CREATE TABLE session_events (
+        id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL CHECK(sequence >= 1),
+        sequence_source TEXT NOT NULL DEFAULT 'recorded' CHECK(sequence_source IN ('recorded','reconstructed')),
+        occurred_at TEXT NOT NULL, utc_offset_minutes INTEGER, elapsed_ms INTEGER CHECK(elapsed_ms >= 0),
+        phase TEXT CHECK(phase IN ('focus','paused','finished')), kind TEXT NOT NULL CHECK(kind IN
+          ('session.started','session.paused','session.resumed','note.added','note.edited','session.finished')),
+        payload_version INTEGER NOT NULL DEFAULT 1, payload TEXT NOT NULL CHECK(json_valid(payload)),
+        UNIQUE(session_id, sequence)) STRICT;
+      CREATE INDEX session_phase_events ON session_events(session_id, sequence DESC)
+        WHERE kind IN ('session.started', 'session.paused', 'session.resumed');
+      PRAGMA user_version = 5;`);
+    old.prepare("INSERT INTO sessions(id,title,started_at) VALUES (?, 'CSV', ?)").run(sessionId, stamp);
+    const add = old.prepare(`INSERT INTO session_events(id,session_id,sequence,occurred_at,elapsed_ms,phase,kind,payload)
+      VALUES (?,?,?,?,?,?,?,?)`);
+    add.run(sessionId + ":start", sessionId, 1, stamp, 0, "focus", "session.started", '{"title":"CSV"}');
+    add.run(randomUUID(), sessionId, 2, stamp, 800, "paused", "session.paused", '{"focusMs":800,"pausedMs":0}');
+    before = old.prepare(read).all();
+  } finally { old.close(); }
+
+  const db = new Store(path, () => 0);
+  try {
+    assert.equal(db.upgradeCopyPath, path + ".before-v5-upgrade.sqlite");
+    const copy = new DatabaseSync(db.upgradeCopyPath, { readOnly: true });
+    try { assert.deepEqual(copy.prepare(read).all(), before); } finally { copy.close(); }
+    const current = new DatabaseSync(path);
+    try { assert.deepEqual(current.prepare(read).all(), before); } finally { current.close(); }
+    db.changePhase({ sessionId, expectedSequence: 2, phase: "focus" });
+    db.startBreak({ sessionId, expectedSequence: 3, minutes: 5 });
+    const { active } = db.snapshot("");
+    assert.deepEqual([active.phase, active.focusMs, active.breakMs], ["break", 800, 0]);
   } finally { db.close(); }
 });

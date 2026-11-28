@@ -33,8 +33,11 @@ const legacyV3Events = `
   FROM previous_session_events WHERE sequence_source = 'reconstructed'
 `;
 
-export function migrateSessionEvents(db: DatabaseSync, version: 2 | 3 | 4): void {
+export const phaseEventKinds = "'session.started', 'session.paused', 'session.resumed', 'break.started', 'break.ended'";
+
+export function migrateSessionEvents(db: DatabaseSync, version: 2 | 3 | 4 | 5): void {
   if (version >= 3) db.exec("ALTER TABLE session_events RENAME TO previous_session_events");
+  if (version === 5) db.exec("DROP INDEX session_phase_events");
   db.exec(`
     CREATE TABLE session_events (
       id TEXT PRIMARY KEY,
@@ -44,8 +47,8 @@ export function migrateSessionEvents(db: DatabaseSync, version: 2 | 3 | 4): void
       occurred_at TEXT NOT NULL,
       utc_offset_minutes INTEGER,
       elapsed_ms INTEGER CHECK (elapsed_ms >= 0),
-      phase TEXT CHECK (phase IN ('focus', 'paused', 'finished')),
-      kind TEXT NOT NULL CHECK (kind IN ('session.started', 'session.paused', 'session.resumed', 'note.added', 'note.edited', 'session.finished')),
+      phase TEXT CHECK (phase IN ('focus', 'paused', 'break', 'finished')),
+      kind TEXT NOT NULL CHECK (kind IN (${phaseEventKinds}, 'note.added', 'note.edited', 'session.finished')),
       payload_version INTEGER NOT NULL DEFAULT 1,
       payload TEXT NOT NULL CHECK (json_valid(payload)),
       UNIQUE (session_id, sequence)
@@ -53,9 +56,9 @@ export function migrateSessionEvents(db: DatabaseSync, version: 2 | 3 | 4): void
   `);
 
   db.exec(`CREATE INDEX session_phase_events ON session_events(session_id, sequence DESC)
-    WHERE kind IN ('session.started', 'session.paused', 'session.resumed')`);
-  if (version === 4) {
-    // v4 already has the final replay order. Rebuild only to widen its CHECK constraints.
+    WHERE kind IN (${phaseEventKinds})`);
+  if (version >= 4) {
+    // These archives already have the final replay order.
     db.exec(`INSERT INTO session_events (id, session_id, sequence, sequence_source, occurred_at,
         utc_offset_minutes, elapsed_ms, phase, kind, payload_version, payload)
       SELECT id, session_id, sequence, sequence_source, occurred_at, utc_offset_minutes, elapsed_ms,

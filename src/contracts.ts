@@ -1,19 +1,29 @@
-export type SessionPhase = "focus" | "paused";
+export type SessionPhase = "focus" | "paused" | "break";
 export interface PhaseTotals {
   focusMs: number;
   pausedMs: number;
+  breakMs: number;
 }
 
-export interface PhaseChange {
+export interface PhaseTarget {
   sessionId: string;
-  phase: SessionPhase;
   expectedSequence: number;
+}
+
+export interface PhaseChange extends PhaseTarget {
+  phase: "focus" | "paused";
+}
+
+export interface BreakRequest extends PhaseTarget {
+  minutes: number;
 }
 
 export interface Session extends PhaseTotals {
   // Totals cover measured intervals through the last phase change.
   phase: SessionPhase | null;
   phaseSequence: number;
+  breakDeadlineAt: string | null;
+  breakDurationMs: number | null;
   id: string;
   title: string;
   startedAt: string;
@@ -36,13 +46,22 @@ export interface NoteVersion {
 
 export interface Snapshot {
   active: Session | null;
+  breakRemainingMs: number | null;
   notes: Note[];
 }
 
+// Events written before timed breaks have no break total.
+type HistoricalTotals = Omit<PhaseTotals, "breakMs"> & { breakMs?: number };
+export type BreakEndReason = "expired" | "early" | "finish" | "overdue-on-reopen";
+
 export type SessionEventData =
   | { kind: "session.started"; payload: { title: string } }
-  | { kind: "session.paused" | "session.resumed"; payload: PhaseTotals }
-  | { kind: "session.finished"; payload: PhaseTotals | Record<string, never> }
+  | { kind: "session.paused" | "session.resumed"; payload: HistoricalTotals }
+  | { kind: "break.started"; payload: PhaseTotals & { durationMs: number; deadlineAt: string } }
+  | { kind: "break.ended"; payload: PhaseTotals & {
+      startSequence: number; reason: BreakEndReason; effectiveAt: string; processedAt: string;
+    } }
+  | { kind: "session.finished"; payload: HistoricalTotals | Record<string, never> }
   | { kind: "note.added" | "note.edited"; payload: { noteId: string; body: string } };
 
 export type SessionEvent = SessionEventData & {
@@ -89,9 +108,10 @@ export interface SessionTape {
   sessionEvents(query: SessionEventQuery): Promise<Reply<SessionEventPage>>;
   start(title: string): Promise<Reply<void>>;
   changePhase(input: PhaseChange): Promise<Reply<void>>;
+  startBreak(input: BreakRequest): Promise<Reply<void>>;
   finish(sessionId: string): Promise<Reply<void>>;
   addNote(note: NoteInput): Promise<Reply<void>>;
   editNote(note: NoteEditInput): Promise<Reply<void>>;
   show(view: View): Promise<Reply<void>>;
-  onChange(listener: () => void): () => void;
+  onChange(listener: (phaseOnly: boolean) => void): () => void;
 }
